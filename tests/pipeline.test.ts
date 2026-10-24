@@ -137,6 +137,17 @@ describe('runAll', () => {
     expect(env.callsTo('gh', 'pr', 'create')).toBe(0)
   })
 
+  test('fails the site when Claude touches a workflow or package file', async () => {
+    const env = makeEnv({
+      handlers: [{ match: (cmd, args) => cmd === 'git' && args[0] === 'status', result: { stdout: ' M package.json\n?? .github/\n' } }],
+    })
+    const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(exitCode).toBe(1)
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package.json, .github/')
+    expect(env.callsTo('npm')).toBe(0)
+    expect(env.callsTo('git', 'push')).toBe(0)
+  })
+
   test('fails the site when the build breaks', async () => {
     const env = makeEnv({ handlers: [{ match: (cmd) => cmd === 'npm', result: { code: 1, stderr: 'vite: missing input' } }] })
     const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })

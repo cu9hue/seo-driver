@@ -3,7 +3,15 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import type { SiteConfig } from '../src/types.js'
-import { changedFiles, cloneSite, commitAndPush, hasGuideTemplate, hasSourcesSection, runBuild } from '../src/workspace.js'
+import {
+  changedFiles,
+  cloneSite,
+  commitAndPush,
+  hasGuideTemplate,
+  hasSourcesSection,
+  protectedChanges,
+  runBuild,
+} from '../src/workspace.js'
 import { fakeExec, is } from './fakeExec.js'
 
 const site: SiteConfig = {
@@ -61,8 +69,8 @@ describe('commitAndPush', () => {
     expect(exec.calls.map((c) => c.args)).toEqual([
       ['checkout', '-b', 'seo-guide/arrange-song'],
       ['add', '-A'],
-      ['commit', '-m', 'Add guide: Arrange'],
-      ['push', '-u', 'origin', 'seo-guide/arrange-song'],
+      ['commit', '--no-verify', '-m', 'Add guide: Arrange'],
+      ['push', '--no-verify', '-u', 'origin', 'seo-guide/arrange-song'],
     ])
     expect(exec.calls.every((c) => c.opts?.cwd === '/clone')).toBe(true)
   })
@@ -109,5 +117,36 @@ describe('hasSourcesSection', () => {
     ['<p>Sources: none</p>', false],
   ])('%s → %s', (html, expected) => {
     expect(hasSourcesSection(html)).toBe(expected)
+  })
+})
+
+describe('protectedChanges', () => {
+  test('flags workflows, package manifests, lockfiles and npm config at any depth', () => {
+    const files = [
+      'index.html',
+      'vite.config.ts',
+      'public/sitemap.xml',
+      'how-to-finish-a-song/index.html',
+      '.github/workflows/deploy.yml',
+      '.github/',
+      'package.json',
+      'worker/package.json',
+      'package-lock.json',
+      'pnpm-lock.yaml',
+      'yarn.lock',
+      'bun.lockb',
+      '.npmrc',
+    ]
+    expect(protectedChanges(files)).toEqual([
+      '.github/workflows/deploy.yml',
+      '.github/',
+      'package.json',
+      'worker/package.json',
+      'package-lock.json',
+      'pnpm-lock.yaml',
+      'yarn.lock',
+      'bun.lockb',
+      '.npmrc',
+    ])
   })
 })

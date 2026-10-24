@@ -35,8 +35,23 @@ export async function changedFiles(exec: Exec, clonePath: string): Promise<strin
 export async function commitAndPush(exec: Exec, clonePath: string, branch: string, message: string): Promise<void> {
   await run(exec, clonePath, 'git', ['checkout', '-b', branch])
   await run(exec, clonePath, 'git', ['add', '-A'])
-  await run(exec, clonePath, 'git', ['commit', '-m', message])
-  await run(exec, clonePath, 'git', ['push', '-u', 'origin', branch])
+  // --no-verify: hooks in the clone are repo code, and these calls run with
+  // the user's credentials.
+  await run(exec, clonePath, 'git', ['commit', '--no-verify', '-m', message])
+  await run(exec, clonePath, 'git', ['push', '--no-verify', '-u', 'origin', branch])
+}
+
+const PROTECTED_DIRS = ['.github/']
+const PROTECTED_FILES = new Set([
+  'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock', '.npmrc',
+])
+
+// Files a guide never needs, whose changes would run code with the user's
+// credentials (install scripts, CI workflows triggered by the push).
+export function protectedChanges(files: string[]): string[] {
+  return files.filter(
+    (file) => PROTECTED_DIRS.some((dir) => file.startsWith(dir)) || PROTECTED_FILES.has(path.basename(file)),
+  )
 }
 
 // Commands are split on spaces and run without a shell, matching the

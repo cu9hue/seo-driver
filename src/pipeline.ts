@@ -9,7 +9,15 @@ import { fetchKeywordIdeas } from './sources/keywordPlanner.js'
 import { fetchSearchGaps } from './sources/searchConsole.js'
 import { keywordTokens, shortlist } from './topics.js'
 import type { Candidate, Config, SiteConfig } from './types.js'
-import { changedFiles, cloneSite, commitAndPush, hasGuideTemplate, hasSourcesSection, runBuild } from './workspace.js'
+import {
+  changedFiles,
+  cloneSite,
+  commitAndPush,
+  hasGuideTemplate,
+  hasSourcesSection,
+  protectedChanges,
+  runBuild,
+} from './workspace.js'
 
 const MAX_FIX_ROUNDS = 2
 
@@ -45,6 +53,13 @@ function guideFile(clonePath: string, guide: GuideResult): string {
   if (!file.startsWith(clonePath + path.sep)) throw new SiteFailure(`guide path ${guide.guidePath} is outside the repo`)
   if (!fs.existsSync(file)) throw new SiteFailure(`guide file ${guide.guidePath} does not exist`)
   return file
+}
+
+async function checkChanges(exec: Exec, clonePath: string): Promise<void> {
+  const files = await changedFiles(exec, clonePath)
+  if (files.length === 0) throw new SiteFailure('writer changed no files')
+  const blocked = protectedChanges(files)
+  if (blocked.length > 0) throw new SiteFailure(`Claude changed protected files: ${blocked.join(', ')}`)
 }
 
 async function writeGuide(
@@ -83,7 +98,7 @@ async function writeGuide(
   const chosen = candidates.find((c) => sameWords(c.keyword, guide.keyword))
   if (!chosen) throw new SiteFailure(`writer picked "${guide.keyword}", which is not on the shortlist`)
   guideFile(clonePath, guide)
-  if ((await changedFiles(exec, clonePath)).length === 0) throw new SiteFailure('writer changed no files')
+  await checkChanges(exec, clonePath)
 
   const fixed: ReviewIssue[] = []
   for (let round = 0; ; round++) {
@@ -113,6 +128,7 @@ async function writeGuide(
       home,
     })
     guideFile(clonePath, guide)
+    await checkChanges(exec, clonePath)
     fixed.push(...review.issues)
   }
   return { guide, chosen, fixed }

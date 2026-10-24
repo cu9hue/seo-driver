@@ -72,6 +72,14 @@ function parseSite(raw: unknown, index: number): SiteConfig {
   }
 }
 
+// Clones are checked against this path, so it must be absolute. A relative
+// path is taken from the config file's folder, which stays put under cron.
+function resolveWorkDir(value: string | undefined, configFile: string): string {
+  if (value === undefined) return path.join(os.homedir(), '.cache', 'seo-driver')
+  if (value === '~' || value.startsWith('~/')) return path.join(os.homedir(), value.slice(1))
+  return path.resolve(path.dirname(path.resolve(configFile)), value)
+}
+
 export function loadConfig(file: string): Config {
   let raw: unknown
   try {
@@ -94,7 +102,7 @@ export function loadConfig(file: string): Config {
   }
 
   return {
-    workDir: optionalString(raw, 'workDir', 'config') ?? path.join(os.homedir(), '.cache', 'seo-driver'),
+    workDir: resolveWorkDir(optionalString(raw, 'workDir', 'config'), file),
     keywordPlanner: {
       customerId: optionalString(kpRaw, 'customerId', 'keywordPlanner'),
       geoTargetConstants: stringArray(kpRaw, 'geoTargetConstants', 'keywordPlanner', ['2840']),

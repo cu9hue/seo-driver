@@ -32,6 +32,16 @@ describe('loadConfig', () => {
     expect(site.searchConsoleProperty).toBeUndefined()
   })
 
+  test('expands ~ in workDir', () => {
+    const config = loadConfig(writeConfig({ workDir: '~/seo-work', sites: [minimalSite] }))
+    expect(config.workDir).toBe(path.join(os.homedir(), 'seo-work'))
+  })
+
+  test('resolves a relative workDir against the config file folder', () => {
+    const file = writeConfig({ workDir: 'work', sites: [minimalSite] })
+    expect(loadConfig(file).workDir).toBe(path.join(path.dirname(file), 'work'))
+  })
+
   test('rejects a site with neither exampleGuide nor instructionsFile', () => {
     const { exampleGuide: _, ...site } = minimalSite
     expect(() => loadConfig(writeConfig({ sites: [site] }))).toThrow(ConfigError)

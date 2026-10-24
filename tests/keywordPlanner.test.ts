@@ -20,10 +20,12 @@ describe('fetchKeywordIdeas', () => {
     const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: '{}' } }])
     await fetchKeywordIdeas(exec, site, kp)
     expect(exec.calls[0].args[1]).toBe('googleads.keywordPlanIdeas.generateKeywordIdeas')
+    // pageSize keeps each response under gum's 16 MiB cap; gum pages through the rest.
     expect(JSON.parse(exec.calls[0].args[3])).toEqual({
       url: 'https://mixingpal.com/',
       geoTargetConstants: ['2840'],
       language: '1000',
+      pageSize: 1000,
     })
   })
 
@@ -54,6 +56,8 @@ describe('fetchKeywordIdeas', () => {
         competition: 'LOW',
       },
       { keyword: 'ableton drop', source: 'keyword-planner', score: 440, avgMonthlySearches: 880, competition: 'MEDIUM' },
+      // Advertiser competition is not ranking difficulty, so HIGH is down-weighted, not dropped.
+      { keyword: 'daw', source: 'keyword-planner', score: 22625, avgMonthlySearches: 90500, competition: 'HIGH' },
     ])
   })
 

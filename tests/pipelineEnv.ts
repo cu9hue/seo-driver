@@ -52,15 +52,19 @@ export interface EnvOptions {
   handlers?: Handler[]
   writer?: (cwd: string) => { stdout: string; code?: number }
   reviewer?: (round: number) => object
+  fixer?: (cwd: string) => GuideResult
+  sitemapLocs?: string[]
 }
 
-const result = (structured: object) => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: structured }) })
+export const result = (structured: object) => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: structured }) })
 
 export function makeEnv(options: EnvOptions = {}): Env {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-work-'))
   const config: Config = {
     workDir,
     keywordPlanner: { geoTargetConstants: ['2840'], language: '1000' },
+    searchConsole: { country: 'usa' },
+    claudeMaxBudgetUsd: 10,
     sites: options.sites ?? [site('mixingpal.com')],
   }
   const claudeRuns: string[] = []
@@ -79,6 +83,10 @@ export function makeEnv(options: EnvOptions = {}): Env {
     { match: is('git', '--version'), result: { stdout: 'git version 2.50' } },
     { match: is('gh', 'auth', 'status'), result: {} },
     { match: is('claude', '--version'), result: { stdout: '2.1.310' } },
+    { match: is('git', 'config', 'user.name'), result: { stdout: 'Polina\n' } },
+    { match: is('git', 'config', 'user.email'), result: { stdout: 'p@example.com\n' } },
+    { match: is('gh', 'config', 'get', 'git_protocol'), result: { stdout: 'https\n' } },
+    { match: is('git', 'config', '--get-urlmatch'), result: { stdout: '!gh auth git-credential\n' } },
     { match: is('gh', 'pr', 'list'), result: { stdout: '[]' } },
     {
       match: is('gum', 'read', 'searchconsole.searchanalytics.query'),
@@ -118,10 +126,10 @@ export function makeEnv(options: EnvOptions = {}): Env {
           return result(options.reviewer ? options.reviewer(reviewRound++) : { pass: true, issues: [] })
         }
         claudeRuns.push('fixer')
-        return result(guideFor('how to finish a song'))
+        return result(options.fixer ? options.fixer(opts!.cwd!) : guideFor('how to finish a song'))
       },
     },
-    { match: is('git', 'status'), result: { stdout: ' M index.html\n?? how-to-finish-a-song/index.html\n' } },
+    { match: is('git', 'status'), result: { stdout: ' M index.html\0?? how-to-finish-a-song/index.html\0' } },
     { match: is('npm'), result: { stdout: 'built' } },
     { match: is('git'), result: {} },
     { match: is('gh', 'label', 'create'), result: {} },
@@ -129,9 +137,10 @@ export function makeEnv(options: EnvOptions = {}): Env {
   ]
 
   const exec = fakeExec([...(options.handlers ?? []), ...defaults])
+  const sitemapLocs = options.sitemapLocs ?? ['https://mixingpal.com/how-to-arrange-a-song/']
   const fetchText: FetchText = async (url) =>
     url.endsWith('/sitemap.xml')
-      ? { status: 200, text: '<urlset><url><loc>https://mixingpal.com/how-to-arrange-a-song/</loc></url></urlset>' }
+      ? { status: 200, text: `<urlset>${sitemapLocs.map((l) => `<url><loc>${l}</loc></url>`).join('')}</urlset>` }
       : { status: 404, text: '' }
   const logs: string[] = []
   const deps: Deps = { exec, fetchText, now: () => NOW, home: '/home/u', log: (line) => logs.push(line) }

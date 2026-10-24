@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { dueCheck, listGuidePrs, openPr, renderPrBody, type GuidePr, type GuideResult } from '../src/github.js'
+import { dueCheck, ensureLabel, listGuidePrs, openPr, renderPrBody, type GuidePr, type GuideResult } from '../src/github.js'
 import type { Candidate, SiteConfig } from '../src/types.js'
 import { fakeExec, is } from './fakeExec.js'
 
@@ -35,7 +35,7 @@ describe('listGuidePrs', () => {
     const exec = fakeExec([{ match: is('gh', 'pr', 'list'), result: { stdout } }])
     const prs = await listGuidePrs(exec, 'x/y')
     expect(exec.calls[0].args).toEqual([
-      'pr', 'list', '--repo', 'x/y', '--label', 'seo-guide', '--state', 'all', '--limit', '100',
+      'pr', 'list', '--repo', 'x/y', '--label', 'seo-guide', '--state', 'all', '--limit', '1000',
       '--json', 'number,state,createdAt,url,body',
     ])
     expect(prs).toEqual([
@@ -82,6 +82,24 @@ describe('dueCheck', () => {
 
   test('no PRs means due', () => {
     expect(dueCheck(site, [], now)).toEqual({ due: true })
+  })
+
+  test('a failed run inside the interval blocks the site', () => {
+    expect(dueCheck(site, [pr(4, 'MERGED', '2026-10-01T07:00:00Z')], now, '2026-10-23T07:00:00Z')).toEqual({
+      due: false,
+      reason: 'last run failed on 2026-10-23; next try 2026-10-25',
+    })
+  })
+
+  test('a failed run older than the interval does not block', () => {
+    expect(dueCheck(site, [], now, '2026-10-22T07:00:00Z')).toEqual({ due: true })
+  })
+
+  test('a newer PR wins over an older failure', () => {
+    expect(dueCheck(site, [pr(4, 'MERGED', '2026-10-23T09:00:00Z')], now, '2026-10-20T07:00:00Z')).toEqual({
+      due: false,
+      reason: 'next guide due 2026-10-25',
+    })
   })
 })
 
@@ -138,34 +156,32 @@ describe('renderPrBody', () => {
   })
 })
 
-describe('openPr', () => {
-  test('creates the label, then the PR with the body on stdin', async () => {
-    const exec = fakeExec([
-      { match: is('gh', 'label', 'create'), result: {} },
-      { match: is('gh', 'pr', 'create'), result: { stdout: 'https://github.com/x/y/pull/7\n' } },
-    ])
-    const url = await openPr(exec, site, 'seo-guide/arrange-song-from-loop', 'Add guide: How to Arrange', 'BODY')
-    expect(url).toBe('https://github.com/x/y/pull/7')
-    expect(exec.calls.map((c) => c.args.slice(0, 2))).toEqual([
-      ['label', 'create'],
-      ['pr', 'create'],
-    ])
+describe('ensureLabel', () => {
+  test('creates or updates the seo-guide label', async () => {
+    const exec = fakeExec([{ match: is('gh', 'label', 'create'), result: {} }])
+    await ensureLabel(exec, site.repo)
     expect(exec.calls[0].args).toEqual([
       'label', 'create', 'seo-guide', '--repo', 'antithetical-labs/mixing-pal-landing', '--force', '--color', '1D76DB',
     ])
-    expect(exec.calls[1].args).toEqual([
+  })
+})
+
+describe('openPr', () => {
+  test('creates the PR with the label and the body on stdin', async () => {
+    const exec = fakeExec([{ match: is('gh', 'pr', 'create'), result: { stdout: 'https://github.com/x/y/pull/7\n' } }])
+    const url = await openPr(exec, site, 'seo-guide/arrange-song-from-loop', 'Add guide: How to Arrange', 'BODY')
+    expect(url).toBe('https://github.com/x/y/pull/7')
+    expect(exec.calls.length).toBe(1)
+    expect(exec.calls[0].args).toEqual([
       'pr', 'create', '--repo', 'antithetical-labs/mixing-pal-landing', '--base', 'main',
       '--head', 'seo-guide/arrange-song-from-loop', '--title', 'Add guide: How to Arrange',
       '--label', 'seo-guide', '--body-file', '-',
     ])
-    expect(exec.calls[1].opts?.input).toBe('BODY')
+    expect(exec.calls[0].opts?.input).toBe('BODY')
   })
 
   test('throws when gh pr create fails', async () => {
-    const exec = fakeExec([
-      { match: is('gh', 'label', 'create'), result: {} },
-      { match: is('gh', 'pr', 'create'), result: { code: 1, stderr: 'a pull request already exists' } },
-    ])
+    const exec = fakeExec([{ match: is('gh', 'pr', 'create'), result: { code: 1, stderr: 'a pull request already exists' } }])
     await expect(openPr(exec, site, 'b', 't', 'body')).rejects.toThrow('already exists')
   })
 })

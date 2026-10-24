@@ -5,6 +5,9 @@ import type { Config, SiteConfig } from './types.js'
 
 // Google's documented keywordSeed cap, which gum enforces.
 const MAX_SEED_KEYWORDS = 20
+// Build commands run without a shell, and each one becomes a Bash(<command>)
+// allow rule for Claude, where * is a wildcard.
+const SHELL_SYNTAX = /[&|;<>`$'"\\*?(){}[\]]|^\s*\w+=/
 
 export class ConfigError extends Error {}
 
@@ -41,8 +44,8 @@ function parseSite(raw: unknown, index: number): SiteConfig {
   if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new ConfigError(`${where}.repo must look like owner/name`)
 
   const intervalDays = raw.intervalDays ?? 2
-  if (typeof intervalDays !== 'number' || !(intervalDays > 0)) {
-    throw new ConfigError(`${where}.intervalDays must be a positive number`)
+  if (typeof intervalDays !== 'number' || !Number.isInteger(intervalDays) || intervalDays < 1) {
+    throw new ConfigError(`${where}.intervalDays must be a whole number of days, 1 or more`)
   }
 
   const seedKeywords = stringArray(raw, 'seedKeywords', where, [])
@@ -52,6 +55,13 @@ function parseSite(raw: unknown, index: number): SiteConfig {
 
   const buildCommands = stringArray(raw, 'buildCommands', where, [])
   if (buildCommands.length === 0) throw new ConfigError(`${where}.buildCommands needs at least one command`)
+  buildCommands.forEach((command, i) => {
+    if (SHELL_SYNTAX.test(command)) {
+      throw new ConfigError(
+        `${where}.buildCommands[${i}] uses shell syntax (${command}); commands run without a shell, so list each one separately`,
+      )
+    }
+  })
 
   const exampleGuide = optionalString(raw, 'exampleGuide', where)
   const instructionsFile = optionalString(raw, 'instructionsFile', where)
@@ -91,6 +101,17 @@ export function loadConfig(file: string): Config {
 
   const kpRaw = raw.keywordPlanner ?? {}
   if (!isObject(kpRaw)) throw new ConfigError('keywordPlanner must be an object')
+  const scRaw = raw.searchConsole ?? {}
+  if (!isObject(scRaw)) throw new ConfigError('searchConsole must be an object')
+  const country = optionalString(scRaw, 'country', 'searchConsole') ?? 'usa'
+  if (country !== 'all' && !/^[a-z]{3}$/.test(country)) {
+    throw new ConfigError('searchConsole.country must be a lowercase ISO 3166-1 alpha-3 code, such as usa, or "all"')
+  }
+
+  const claudeMaxBudgetUsd = raw.claudeMaxBudgetUsd ?? 10
+  if (typeof claudeMaxBudgetUsd !== 'number' || !(claudeMaxBudgetUsd > 0)) {
+    throw new ConfigError('claudeMaxBudgetUsd must be a positive number')
+  }
 
   if (!Array.isArray(raw.sites) || raw.sites.length === 0) throw new ConfigError('sites needs at least one site')
   const sites = raw.sites.map(parseSite)
@@ -108,6 +129,8 @@ export function loadConfig(file: string): Config {
       geoTargetConstants: stringArray(kpRaw, 'geoTargetConstants', 'keywordPlanner', ['2840']),
       language: optionalString(kpRaw, 'language', 'keywordPlanner') ?? '1000',
     },
+    searchConsole: { country: country === 'all' ? undefined : country },
+    claudeMaxBudgetUsd,
     sites,
   }
 }

@@ -13,6 +13,10 @@ export interface SiteConfig {
 export interface Config {
   workDir: string
   keywordPlanner: { customerId?: string; geoTargetConstants: string[]; language: string }
+  // ISO 3166-1 alpha-3, lowercase; undefined means every country.
+  searchConsole: { country?: string }
+  // Per Claude run.
+  claudeMaxBudgetUsd: number
   sites: SiteConfig[]
 }
 

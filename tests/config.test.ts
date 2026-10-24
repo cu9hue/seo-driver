@@ -71,6 +71,36 @@ describe('loadConfig', () => {
     expect(() => loadConfig(writeConfig({ sites: [{ ...minimalSite, buildCommands: [] }] }))).toThrow(/buildCommands/)
   })
 
+  test.each([['npm ci && npm run build'], ['NODE_ENV=production npm run build'], ['npm run build | tee log'], ['npm run *']])(
+    'rejects shell syntax in buildCommands: %s',
+    (command) => {
+      expect(() => loadConfig(writeConfig({ sites: [{ ...minimalSite, buildCommands: [command] }] }))).toThrow(/shell/)
+    },
+  )
+
+  test('rejects a fractional intervalDays', () => {
+    expect(() => loadConfig(writeConfig({ sites: [{ ...minimalSite, intervalDays: 1.5 }] }))).toThrow(/whole number/)
+  })
+
+  test('defaults the Claude budget and the Search Console country', () => {
+    const config = loadConfig(writeConfig({ sites: [minimalSite] }))
+    expect(config.claudeMaxBudgetUsd).toBe(10)
+    expect(config.searchConsole.country).toBe('usa')
+  })
+
+  test('country "all" turns the Search Console country filter off', () => {
+    const config = loadConfig(writeConfig({ searchConsole: { country: 'all' }, sites: [minimalSite] }))
+    expect(config.searchConsole.country).toBeUndefined()
+  })
+
+  test('rejects a country that is not a 3-letter code', () => {
+    expect(() => loadConfig(writeConfig({ searchConsole: { country: 'US' }, sites: [minimalSite] }))).toThrow(/country/)
+  })
+
+  test('rejects a non-positive Claude budget', () => {
+    expect(() => loadConfig(writeConfig({ claudeMaxBudgetUsd: 0, sites: [minimalSite] }))).toThrow(/claudeMaxBudgetUsd/)
+  })
+
   test('names the file when it is not valid JSON', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-config-'))
     const file = path.join(dir, 'broken.json')

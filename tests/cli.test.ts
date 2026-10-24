@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { main } from '../src/cli.js'
+import { logLine, main } from '../src/cli.js'
 import { makeEnv } from './pipelineEnv.js'
 
 function configFile(): string {
@@ -52,5 +52,9 @@ describe('main', () => {
     const env = makeEnv()
     expect(await main(['publish'], env.deps)).toBe(1)
     expect(env.logs.join('\n')).toContain('usage: seo-driver run')
+  })
+
+  test('log lines start with a UTC timestamp', () => {
+    expect(logLine(new Date('2026-10-24T07:00:05Z'), 'mixingpal.com: dry-run')).toBe('2026-10-24T07:00:05Z mixingpal.com: dry-run')
   })
 })

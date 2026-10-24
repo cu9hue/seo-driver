@@ -69,6 +69,10 @@ describe('preflight', () => {
     { match: is('git', '--version'), result: { stdout: 'git version 2.50' } },
     { match: is('gh', 'auth', 'status'), result: { stdout: 'Logged in' } },
     { match: is('claude', '--version'), result: { stdout: '2.1.310' } },
+    { match: is('git', 'config', 'user.name'), result: { stdout: 'Polina\n' } },
+    { match: is('git', 'config', 'user.email'), result: { stdout: 'p@example.com\n' } },
+    { match: is('gh', 'config', 'get', 'git_protocol'), result: { stdout: 'https\n' } },
+    { match: is('git', 'config', '--get-urlmatch', 'credential.helper', 'https://github.com'), result: { stdout: '!gh auth git-credential\n' } },
   ]
 
   test('passes when every program answers', async () => {
@@ -87,6 +91,25 @@ describe('preflight', () => {
     ])
     await expect(preflight(exec)).rejects.toThrow('`gh auth status` failed: You are not logged into any GitHub hosts.')
   })
+
+  test('names a missing git identity', async () => {
+    const exec = fakeExec([{ match: is('git', 'config', 'user.email'), result: { code: 1 } }, ...ok])
+    await expect(preflight(exec)).rejects.toThrow('git user.email is not set')
+  })
+
+  test('names missing push credentials for https remotes', async () => {
+    const exec = fakeExec([{ match: is('git', 'config', '--get-urlmatch'), result: { code: 1 } }, ...ok])
+    await expect(preflight(exec)).rejects.toThrow('gh auth setup-git')
+  })
+
+  test('skips the credential helper check for ssh remotes', async () => {
+    const exec = fakeExec([
+      { match: is('gh', 'config', 'get', 'git_protocol'), result: { stdout: 'ssh\n' } },
+      { match: is('git', 'config', '--get-urlmatch'), result: { code: 1 } },
+      ...ok,
+    ])
+    await expect(preflight(exec)).resolves.toBeUndefined()
+  })
 })
 
 describe('realExec', () => {
@@ -98,5 +121,13 @@ describe('realExec', () => {
   test('passes input on stdin and captures stdout', async () => {
     const result = await realExec(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'], { input: 'hello' })
     expect(result).toEqual({ code: 0, stdout: 'hello', stderr: '' })
+  })
+
+  test('kills a command that runs past its timeout', async () => {
+    const started = Date.now()
+    const result = await realExec(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { timeoutMs: 300 })
+    expect(result.code).toBe(124)
+    expect(result.stderr).toContain('timed out after 0.3s')
+    expect(Date.now() - started).toBeLessThan(5000)
   })
 })

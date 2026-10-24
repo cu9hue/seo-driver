@@ -22,15 +22,23 @@ describe('searchConsoleWindow', () => {
 })
 
 describe('fetchSearchGaps', () => {
-  test('sends the property, window and query dimension', async () => {
+  test('sends the property, window, query dimension and the API row maximum', async () => {
     const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: '{}' } }])
     await fetchSearchGaps(exec, site, today)
     const args = JSON.parse(exec.calls[0].args[3])
     expect(exec.calls[0].args[1]).toBe('searchconsole.searchanalytics.query')
+    // Rows come sorted by clicks, so zero-click gaps sit at the end.
     expect(args).toEqual({
       siteUrl: 'sc-domain:mixingpal.com',
-      body: { startDate: '2026-09-25', endDate: '2026-10-22', dimensions: ['query'], rowLimit: 1000 },
+      body: { startDate: '2026-09-25', endDate: '2026-10-22', dimensions: ['query'], rowLimit: 25000 },
     })
+  })
+
+  test('filters to the configured country', async () => {
+    const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: '{}' } }])
+    await fetchSearchGaps(exec, site, today, 'usa')
+    const { body } = JSON.parse(exec.calls[0].args[3])
+    expect(body.dimensionFilterGroups).toEqual([{ filters: [{ dimension: 'country', operator: 'equals', expression: 'usa' }] }])
   })
 
   test('keeps high-impression low-click rows', async () => {

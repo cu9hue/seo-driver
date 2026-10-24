@@ -8,6 +8,9 @@ const LAG_DAYS = 2
 const WINDOW_DAYS = 28
 const MIN_IMPRESSIONS = 100
 const MAX_CTR = 0.01
+// The API maximum. Rows come sorted by clicks, so a smaller limit cuts off
+// the zero-click queries first.
+const ROW_LIMIT = 25000
 
 interface Row {
   keys?: string[]
@@ -25,11 +28,13 @@ export function searchConsoleWindow(today: Date): { startDate: string; endDate: 
   return { startDate: isoDate(start), endDate: isoDate(end) }
 }
 
-export async function fetchSearchGaps(exec: Exec, site: SiteConfig, today: Date): Promise<Candidate[]> {
+export async function fetchSearchGaps(exec: Exec, site: SiteConfig, today: Date, country?: string): Promise<Candidate[]> {
   if (!site.searchConsoleProperty) return []
+  const body: Record<string, unknown> = { ...searchConsoleWindow(today), dimensions: ['query'], rowLimit: ROW_LIMIT }
+  if (country) body.dimensionFilterGroups = [{ filters: [{ dimension: 'country', operator: 'equals', expression: country }] }]
   const response = (await gumRead(exec, 'searchconsole.searchanalytics.query', {
     siteUrl: site.searchConsoleProperty,
-    body: { ...searchConsoleWindow(today), dimensions: ['query'], rowLimit: 1000 },
+    body,
   })) as { rows?: Row[] }
 
   const gaps: Candidate[] = []

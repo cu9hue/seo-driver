@@ -37,7 +37,7 @@ async function gh(exec: Exec, args: string[], input?: string): Promise<string> {
 
 export async function listGuidePrs(exec: Exec, repo: string): Promise<GuidePr[]> {
   const stdout = await gh(exec, [
-    'pr', 'list', '--repo', repo, '--label', GUIDE_LABEL, '--state', 'all', '--limit', '100',
+    'pr', 'list', '--repo', repo, '--label', GUIDE_LABEL, '--state', 'all', '--limit', '1000',
     '--json', 'number,state,createdAt,url,body',
   ])
   const rows = JSON.parse(stdout) as Array<Omit<GuidePr, 'keyword'> & { body: string }>
@@ -46,17 +46,31 @@ export async function listGuidePrs(exec: Exec, repo: string): Promise<GuidePr[]>
 
 const utcDay = (d: Date) => Math.floor(d.getTime() / DAY_MS)
 
+const isoDay = (day: number) => new Date(day * DAY_MS).toISOString().slice(0, 10)
+
 // Compares calendar days (UTC), so a daily run at a fixed hour stays on
 // schedule even when the previous PR opened a few minutes later in the day.
-export function dueCheck(site: SiteConfig, prs: GuidePr[], now: Date): { due: true } | { due: false; reason: string } {
+// A failed run counts like an opened PR, so a broken site does not repeat its
+// Claude runs every day.
+export function dueCheck(
+  site: SiteConfig,
+  prs: GuidePr[],
+  now: Date,
+  lastFailure?: string,
+): { due: true } | { due: false; reason: string } {
   const open = prs.find((pr) => pr.state === 'OPEN')
   if (open) return { due: false, reason: `guide PR #${open.number} is still open` }
 
-  const newest = Math.max(...prs.map((pr) => Date.parse(pr.createdAt)))
+  const newestPr = Math.max(...prs.map((pr) => Date.parse(pr.createdAt)))
+  const failed = lastFailure ? Date.parse(lastFailure) : -Infinity
+  const newest = Math.max(newestPr, failed)
   if (!Number.isFinite(newest)) return { due: true }
   const dueDay = utcDay(new Date(newest)) + site.intervalDays
   if (utcDay(now) >= dueDay) return { due: true }
-  return { due: false, reason: `next guide due ${new Date(dueDay * DAY_MS).toISOString().slice(0, 10)}` }
+  if (failed > newestPr) {
+    return { due: false, reason: `last run failed on ${isoDay(utcDay(new Date(failed)))}; next try ${isoDay(dueDay)}` }
+  }
+  return { due: false, reason: `next guide due ${isoDay(dueDay)}` }
 }
 
 function describeNumbers(c: Candidate): string {
@@ -97,8 +111,11 @@ export function renderPrBody(input: {
   ].join('\n\n')
 }
 
+export async function ensureLabel(exec: Exec, repo: string): Promise<void> {
+  await gh(exec, ['label', 'create', GUIDE_LABEL, '--repo', repo, '--force', '--color', '1D76DB'])
+}
+
 export async function openPr(exec: Exec, site: SiteConfig, branch: string, title: string, body: string): Promise<string> {
-  await gh(exec, ['label', 'create', GUIDE_LABEL, '--repo', site.repo, '--force', '--color', '1D76DB'])
   const stdout = await gh(
     exec,
     [

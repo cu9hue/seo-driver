@@ -1,7 +1,9 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { runAll, type SiteOutcome } from '../src/pipeline.js'
-import { guideFor, makeEnv, site } from './pipelineEnv.js'
+import { FAILURES_FILE, LOCK_FILE, readFailures } from '../src/runState.js'
+import { guideFor, makeEnv, NOW, site } from './pipelineEnv.js'
 
 const clonePathOf = (outcome: SiteOutcome) => ('clonePath' in outcome ? outcome.clonePath : undefined)
 
@@ -139,11 +141,16 @@ describe('runAll', () => {
 
   test('fails the site when Claude touches a workflow or package file', async () => {
     const env = makeEnv({
-      handlers: [{ match: (cmd, args) => cmd === 'git' && args[0] === 'status', result: { stdout: ' M package.json\n?? .github/\n' } }],
+      handlers: [
+        {
+          match: (cmd, args) => cmd === 'git' && args[0] === 'status',
+          result: { stdout: ' M package.json\0?? .github/workflows/x.yml\0' },
+        },
+      ],
     })
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(exitCode).toBe(1)
-    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package.json, .github/')
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package.json, .github/workflows/x.yml')
     expect(env.callsTo('npm')).toBe(0)
     expect(env.callsTo('git', 'push')).toBe(0)
   })
@@ -209,5 +216,180 @@ describe('runAll', () => {
     expect(outcomes).toEqual([])
     expect(env.logs.join('\n')).toContain('`gum` is not installed')
     expect(env.callsTo('gh', 'pr', 'list')).toBe(0)
+  })
+
+  test('a Search Console failure fails only that site', async () => {
+    const env = makeEnv({
+      sites: [site('first.com'), site('second.com')],
+      handlers: [
+        {
+          match: (cmd, args) => cmd === 'gum' && args[1] === 'searchconsole.searchanalytics.query' && args[3].includes('first.com'),
+          result: { code: 1, stderr: '{"error_code":"PERMISSION_DENIED","message":"no access to property"}' },
+        },
+      ],
+    })
+    const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes.map((o) => [o.domain, o.status])).toEqual([
+      ['first.com', 'failed'],
+      ['second.com', 'opened'],
+    ])
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('no access to property')
+    expect(exitCode).toBe(1)
+  })
+
+  test('filters Search Console to the configured country', async () => {
+    const env = makeEnv()
+    await runAll(env.config, env.deps, { dryRun: true })
+    const call = env.exec.calls.find((c) => c.cmd === 'gum' && c.args[1] === 'searchconsole.searchanalytics.query')!
+    expect(call.args[3]).toContain('"expression":"usa"')
+  })
+
+  test('exits without work while another run holds the lock', async () => {
+    const env = makeEnv()
+    fs.mkdirSync(env.config.workDir, { recursive: true })
+    fs.writeFileSync(path.join(env.config.workDir, LOCK_FILE), JSON.stringify({ pid: process.pid, startedAt: NOW.toISOString() }))
+    const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(exitCode).toBe(1)
+    expect(outcomes).toEqual([])
+    expect(env.logs.join('\n')).toContain(`another seo-driver run (pid ${process.pid}`)
+    expect(env.callsTo('gh', 'pr', 'list')).toBe(0)
+  })
+
+  test('releases the lock when the run ends', async () => {
+    const env = makeEnv({ writer: () => ({ code: 1, stdout: '' }) })
+    await runAll(env.config, env.deps, { dryRun: false })
+    expect(fs.existsSync(path.join(env.config.workDir, LOCK_FILE))).toBe(false)
+  })
+
+  test('a failed site waits out its interval before the next try', async () => {
+    const env = makeEnv({ writer: () => ({ code: 1, stdout: '' }) })
+    await runAll(env.config, env.deps, { dryRun: false })
+    expect(readFailures(env.config.workDir)).toEqual({ 'mixingpal.com': NOW.toISOString() })
+    const again = await runAll(env.config, env.deps, { dryRun: false })
+    expect(again.outcomes).toEqual([
+      { domain: 'mixingpal.com', status: 'skipped', reason: 'last run failed on 2026-10-24; next try 2026-10-26' },
+    ])
+    expect(env.claudeRuns).toEqual(['writer'])
+  })
+
+  test('a failed dry run records no failure', async () => {
+    const env = makeEnv({ writer: () => ({ code: 1, stdout: '' }) })
+    await runAll(env.config, env.deps, { dryRun: true })
+    expect(fs.existsSync(path.join(env.config.workDir, FAILURES_FILE))).toBe(false)
+  })
+
+  test('skips the push when a guide PR opened while this run was writing', async () => {
+    let lists = 0
+    const env = makeEnv({
+      handlers: [
+        {
+          match: (cmd, args) => cmd === 'gh' && args[1] === 'list',
+          result: () => ({
+            stdout: JSON.stringify(
+              lists++ === 0 ? [] : [{ number: 9, state: 'OPEN', createdAt: '2026-10-24T07:01:00Z', url: 'u', body: '' }],
+            ),
+          }),
+        },
+      ],
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes).toEqual([
+      { domain: 'mixingpal.com', status: 'skipped', reason: 'guide PR #9 opened while this run was writing' },
+    ])
+    expect(env.callsTo('git', 'push')).toBe(0)
+    expect(fs.readdirSync(env.config.workDir)).toEqual([])
+  })
+
+  test('creates the label before the push, and deletes the pushed branch when the PR cannot open', async () => {
+    const env = makeEnv({
+      handlers: [{ match: (cmd, args) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'create', result: { code: 1, stderr: 'HTTP 502' } }],
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('HTTP 502')
+    const order = env.exec.calls.map((c) => [c.cmd, ...c.args].slice(0, 3).join(' '))
+    expect(order.indexOf('gh label create')).toBeLessThan(order.indexOf('git push --no-verify'))
+    const remove = env.exec.calls.find((c) => c.cmd === 'git' && c.args.includes('--delete'))
+    expect(remove?.args).toEqual(['push', '--no-verify', 'origin', '--delete', 'seo-guide/how-to-finish-a-song'])
+  })
+
+  test('fails the site when the build changes a protected file', async () => {
+    let built = false
+    const env = makeEnv({
+      handlers: [
+        { match: (cmd) => cmd === 'npm', result: () => ((built = true), { stdout: 'built' }) },
+        {
+          match: (cmd, args) => cmd === 'git' && args[0] === 'status',
+          result: () => ({ stdout: `?? how-to-finish-a-song/index.html\0${built ? ' M package-lock.json\0' : ''}` }),
+        },
+      ],
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package-lock.json')
+    expect(env.callsTo('git', 'push')).toBe(0)
+  })
+
+  test("keeps the writer's keyword when the fixer changes it", async () => {
+    const env = makeEnv({
+      reviewer: (round) => (round === 0 ? { pass: false, issues: [{ kind: 'slop', location: 'intro', detail: 'x' }] } : { pass: true, issues: [] }),
+      fixer: () => ({ ...guideFor('finish songs faster'), slug: 'finish-songs-faster' }),
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status).toBe('opened')
+    const prCreate = env.exec.calls.find((c) => c.cmd === 'gh' && c.args[0] === 'pr' && c.args[1] === 'create')!
+    expect(prCreate.opts?.input).toContain('<!-- seo-driver keyword: how to finish a song -->')
+    expect(prCreate.args).toContain('seo-guide/how-to-finish-a-song')
+  })
+
+  test('fails the site when the fixer moves the guide', async () => {
+    const env = makeEnv({
+      reviewer: () => ({ pass: false, issues: [{ kind: 'slop', location: 'intro', detail: 'x' }] }),
+      fixer: (cwd) => {
+        fs.mkdirSync(path.join(cwd, 'finish-a-song'), { recursive: true })
+        fs.writeFileSync(path.join(cwd, 'finish-a-song', 'index.html'), '<h2>Sources</h2>')
+        return { ...guideFor('how to finish a song'), guidePath: 'finish-a-song/index.html' }
+      },
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain(
+      'fixer moved the guide from how-to-finish-a-song/index.html to finish-a-song/index.html',
+    )
+  })
+
+  test('drops topics the repo already has a page for, and removes the clone', async () => {
+    const env = makeEnv({
+      handlers: [
+        {
+          match: (cmd, args) => cmd === 'gh' && args[0] === 'repo' && args[1] === 'clone',
+          result: (_cmd, args) => {
+            for (const dir of ['how-to-arrange-a-song', 'how-to-finish-a-song', 'ableton-drop']) {
+              fs.mkdirSync(path.join(args[3], dir), { recursive: true })
+              fs.writeFileSync(path.join(args[3], dir, 'index.html'), '<h1>x</h1>')
+            }
+            return {}
+          },
+        },
+      ],
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes).toEqual([{ domain: 'mixingpal.com', status: 'skipped', reason: 'no candidates' }])
+    expect(env.claudeRuns).toEqual([])
+    expect(fs.readdirSync(env.config.workDir)).toEqual([])
+  })
+
+  test('logs each Claude session with its cost', async () => {
+    const env = makeEnv()
+    await runAll(env.config, env.deps, { dryRun: true })
+    expect(env.logs).toContain('mixingpal.com writer: claude session unknown, cost $0.00')
+    expect(env.logs).toContain('mixingpal.com reviewer: claude session unknown, cost $0.00')
+  })
+
+  test('caps the covered list in the writer prompt', async () => {
+    // 450 sitemap pages plus the clone's how-to-arrange-a-song.
+    const env = makeEnv({ sitemapLocs: Array.from({ length: 450 }, (_, i) => `https://mixingpal.com/page-number-${i}/`) })
+    await runAll(env.config, env.deps, { dryRun: true })
+    const writerCall = env.exec.calls.find((c) => c.cmd === 'claude' && c.opts?.input?.startsWith('You are adding'))!
+    expect(writerCall.opts?.input).toContain('- page-number-299\n')
+    expect(writerCall.opts?.input).not.toContain('page-number-300\n')
+    expect(writerCall.opts?.input).toContain('- (and 151 more)')
   })
 })

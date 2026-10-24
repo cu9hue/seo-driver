@@ -23,6 +23,9 @@ function describe(outcome: SiteOutcome): string {
   }
 }
 
+// Cron appends every run to one file, so each line says when it happened.
+export const logLine = (now: Date, line: string) => `${now.toISOString().replace(/\.\d{3}Z$/, 'Z')} ${line}`
+
 export async function main(argv: string[], deps: Deps): Promise<number> {
   let parsed
   try {
@@ -68,7 +71,7 @@ if (invoked) {
     fetchText: realFetchText,
     now: () => new Date(),
     home: os.homedir(),
-    log: (line) => console.log(line),
+    log: (line) => console.log(logLine(new Date(), line)),
   }
   main(process.argv.slice(2), deps).then((code) => process.exit(code))
 }

@@ -10,6 +10,11 @@ describe('keywordTokens', () => {
     expect([...keywordTokens('How to Arrange a Song?')]).toEqual(['arrange', 'song'])
     expect([...keywordTokens('how-to-arrange-a-song')]).toEqual(['arrange', 'song'])
   })
+
+  test('keeps letters outside ASCII', () => {
+    expect([...keywordTokens('Mischpult für Anfänger')]).toEqual(['mischpult', 'für', 'anfänger'])
+    expect(keywordTokens('ミキシング').size).toBe(1)
+  })
 })
 
 describe('isCovered', () => {

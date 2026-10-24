@@ -4,6 +4,7 @@ import type { Exec } from './exec.js'
 import type { SiteConfig } from './types.js'
 
 const RESEARCH_TOOLS = ['Glob', 'Grep', 'WebSearch', 'WebFetch', 'Skill']
+const CLAUDE_TIMEOUT_MS = 45 * 60 * 1000
 const writingSkillDir = (home: string) => path.join(home, '.claude', 'skills', 'writing')
 
 export function allowedTools(site: SiteConfig, _home: string): string[] {
@@ -22,7 +23,16 @@ export function deniedTools(): string[] {
 
 export async function runClaude<T>(
   exec: Exec,
-  opts: { cwd: string; prompt: string; tools: string[]; schema: object; home: string },
+  opts: {
+    cwd: string
+    prompt: string
+    tools: string[]
+    schema: object
+    home: string
+    maxBudgetUsd: number
+    label: string
+    log: (line: string) => void
+  },
 ): Promise<T> {
   const result = await exec(
     'claude',
@@ -31,7 +41,8 @@ export async function runClaude<T>(
       '--output-format', 'json',
       '--json-schema', JSON.stringify(opts.schema),
       // Overrides a defaultMode (auto, bypass) from the user's settings.
-      '--permission-mode', 'default',
+      '--permission-mode', 'manual',
+      '--max-budget-usd', String(opts.maxBudgetUsd),
       // Ignore .claude/ settings inside the cloned site repo.
       '--setting-sources', 'user',
       // User hooks can rewrite commands (so they stop matching the allowlist)
@@ -43,16 +54,18 @@ export async function runClaude<T>(
       '--allowedTools', opts.tools.join(','),
       '--disallowedTools', deniedTools().join(','),
     ],
-    { cwd: opts.cwd, input: opts.prompt },
+    { cwd: opts.cwd, input: opts.prompt, timeoutMs: CLAUDE_TIMEOUT_MS },
   )
   if (result.code !== 0) throw new Error(`claude exited ${result.code}: ${(result.stderr || result.stdout).trim()}`)
 
-  let parsed: { is_error?: boolean; result?: string; structured_output?: T }
+  let parsed: { is_error?: boolean; result?: string; structured_output?: T; session_id?: string; total_cost_usd?: number }
   try {
     parsed = JSON.parse(result.stdout)
   } catch {
     throw new Error('claude returned output that is not JSON')
   }
+  // The session id lets you resume a run with `claude -r` to see what it did.
+  opts.log(`${opts.label}: claude session ${parsed.session_id ?? 'unknown'}, cost $${(parsed.total_cost_usd ?? 0).toFixed(2)}`)
   if (parsed.is_error) throw new Error(`claude reported an error: ${parsed.result ?? 'no detail'}`)
   if (parsed.structured_output === undefined) throw new Error('claude returned no structured_output')
   return parsed.structured_output

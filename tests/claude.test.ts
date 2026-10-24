@@ -41,6 +41,7 @@ describe('allowedTools', () => {
 
 describe('runClaude', () => {
   const schema = { type: 'object' }
+  const base = { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h', maxBudgetUsd: 7.5, label: 'writer', log: () => {} }
 
   test('runs headless with the allowlist and returns structured_output', async () => {
     const exec = fakeExec([
@@ -50,19 +51,20 @@ describe('runClaude', () => {
       },
     ])
     const result = await runClaude<{ pass: boolean }>(exec, {
+      ...base,
       cwd: '/clone',
       prompt: 'review it',
       tools: ['Read(./**)', 'WebFetch'],
-      schema,
       home: '/home/u',
     })
     expect(result).toEqual({ pass: true, issues: [] })
     const call = exec.calls[0]
-    expect(call.opts).toEqual({ cwd: '/clone', input: 'review it' })
+    expect(call.opts).toEqual({ cwd: '/clone', input: 'review it', timeoutMs: 45 * 60 * 1000 })
     const args = call.args
     expect(args.slice(0, 3)).toEqual(['-p', '--output-format', 'json'])
     expect(args[args.indexOf('--json-schema') + 1]).toBe('{"type":"object"}')
-    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default')
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('manual')
+    expect(args[args.indexOf('--max-budget-usd') + 1]).toBe('7.5')
     expect(args[args.indexOf('--setting-sources') + 1]).toBe('user')
     expect(args[args.indexOf('--allowedTools') + 1]).toBe('Read(./**),WebFetch')
     expect(args[args.indexOf('--disallowedTools') + 1]).toBe(deniedTools().join(','))
@@ -74,21 +76,33 @@ describe('runClaude', () => {
     expect(args[args.indexOf('--add-dir') + 1]).toBe('/home/u/.claude/skills/writing')
   })
 
+  test('logs the session id and cost, even for a failed run', async () => {
+    const logs: string[] = []
+    const exec = fakeExec([
+      {
+        match: is('claude', '-p'),
+        result: { stdout: JSON.stringify({ is_error: true, result: 'budget reached', session_id: 'abc-123', total_cost_usd: 7.512 }) },
+      },
+    ])
+    await expect(runClaude(exec, { ...base, log: (l: string) => logs.push(l) })).rejects.toThrow('budget reached')
+    expect(logs).toEqual(['writer: claude session abc-123, cost $7.51'])
+  })
+
   test('throws when is_error is true', async () => {
     const exec = fakeExec([
       { match: is('claude', '-p'), result: { stdout: JSON.stringify({ is_error: true, result: 'max turns reached' }) } },
     ])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('max turns reached')
+    await expect(runClaude(exec, base)).rejects.toThrow('max turns reached')
   })
 
   test('throws when structured_output is missing', async () => {
     const exec = fakeExec([{ match: is('claude', '-p'), result: { stdout: JSON.stringify({ is_error: false, result: 'done' }) } }])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('structured_output')
+    await expect(runClaude(exec, base)).rejects.toThrow('structured_output')
   })
 
   test('throws when claude exits non-zero', async () => {
     const exec = fakeExec([{ match: is('claude', '-p'), result: { code: 1, stderr: 'not logged in' } }])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('not logged in')
+    await expect(runClaude(exec, base)).rejects.toThrow('not logged in')
   })
 })
 

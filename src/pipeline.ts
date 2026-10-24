@@ -1,10 +1,20 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { allowedTools, guideSchema, renderPrompt, reviewerTools, reviewSchema, runClaude } from './claude.js'
-import { sitemapSlugs, type FetchText } from './covered.js'
+import { repoSlugs, sitemapSlugs, type FetchText } from './covered.js'
 import type { Exec } from './exec.js'
-import { dueCheck, listGuidePrs, openPr, renderPrBody, type GuidePr, type GuideResult, type ReviewIssue } from './github.js'
+import {
+  dueCheck,
+  ensureLabel,
+  listGuidePrs,
+  openPr,
+  renderPrBody,
+  type GuidePr,
+  type GuideResult,
+  type ReviewIssue,
+} from './github.js'
 import { GumError, preflight } from './gum.js'
+import { acquireLock, readFailures, recordFailure } from './runState.js'
 import { fetchKeywordIdeas } from './sources/keywordPlanner.js'
 import { fetchSearchGaps } from './sources/searchConsole.js'
 import { keywordTokens, shortlist } from './topics.js'
@@ -13,6 +23,7 @@ import {
   changedFiles,
   cloneSite,
   commitAndPush,
+  deleteRemoteBranch,
   hasGuideTemplate,
   hasSourcesSection,
   protectedChanges,
@@ -20,6 +31,9 @@ import {
 } from './workspace.js'
 
 const MAX_FIX_ROUNDS = 2
+// Every prompt carries the covered list; a large site would otherwise fill
+// the context with it.
+const MAX_COVERED_IN_PROMPT = 300
 
 export interface Deps {
   exec: Exec
@@ -55,14 +69,27 @@ function guideFile(clonePath: string, guide: GuideResult): string {
   return file
 }
 
-async function checkChanges(exec: Exec, clonePath: string): Promise<void> {
+async function checkChanges(exec: Exec, clonePath: string, who: string): Promise<void> {
   const files = await changedFiles(exec, clonePath)
   if (files.length === 0) throw new SiteFailure('writer changed no files')
   const blocked = protectedChanges(files)
-  if (blocked.length > 0) throw new SiteFailure(`Claude changed protected files: ${blocked.join(', ')}`)
+  if (blocked.length > 0) throw new SiteFailure(`${who} changed protected files: ${blocked.join(', ')}`)
 }
 
+function describeCovered(covered: string[]): string {
+  if (covered.length === 0) return '- (none yet)'
+  const shown = covered.slice(0, MAX_COVERED_IN_PROMPT).map((c) => `- ${c}`)
+  if (covered.length > MAX_COVERED_IN_PROMPT) shown.push(`- (and ${covered.length - MAX_COVERED_IN_PROMPT} more)`)
+  return shown.join('\n')
+}
+
+const describeError = (err: unknown) =>
+  err instanceof GumError
+    ? `${err.opId} failed: ${[err.errorCode, err.message].filter(Boolean).join(' ')}`
+    : (err as Error).message
+
 async function writeGuide(
+  config: Config,
   deps: Deps,
   site: SiteConfig,
   clonePath: string,
@@ -70,7 +97,8 @@ async function writeGuide(
   covered: string[],
 ): Promise<{ guide: GuideResult; chosen: Candidate; fixed: ReviewIssue[] }> {
   const { exec, home, log } = deps
-  const coveredList = covered.map((c) => `- ${c}`).join('\n') || '- (none yet)'
+  const claude = (label: string) => ({ home, maxBudgetUsd: config.claudeMaxBudgetUsd, label: `${site.domain} ${label}`, log })
+  const coveredList = describeCovered(covered)
   const buildCommands = site.buildCommands.join(', then ')
   const instructions = site.instructionsFile
     ? (() => {
@@ -92,13 +120,13 @@ async function writeGuide(
     }),
     tools: allowedTools(site, home),
     schema: guideSchema,
-    home,
+    ...claude('writer'),
   })
 
   const chosen = candidates.find((c) => sameWords(c.keyword, guide.keyword))
   if (!chosen) throw new SiteFailure(`writer picked "${guide.keyword}", which is not on the shortlist`)
   guideFile(clonePath, guide)
-  await checkChanges(exec, clonePath)
+  await checkChanges(exec, clonePath, 'Claude')
 
   const fixed: ReviewIssue[] = []
   for (let round = 0; ; round++) {
@@ -108,7 +136,7 @@ async function writeGuide(
       prompt: renderPrompt('reviewer', { guidePath: guide.guidePath, keyword: guide.keyword, covered: coveredList }),
       tools: reviewerTools(site, home),
       schema: reviewSchema,
-      home,
+      ...claude('reviewer'),
     })
     if (review.pass && review.issues.length === 0) break
     if (round === MAX_FIX_ROUNDS) {
@@ -116,7 +144,7 @@ async function writeGuide(
       throw new SiteFailure(`review still failing after ${MAX_FIX_ROUNDS} fix rounds: ${kinds}`)
     }
     log(`${site.domain}: fixing ${review.issues.length} review issues`)
-    guide = await runClaude<GuideResult>(exec, {
+    const fixedGuide = await runClaude<GuideResult>(exec, {
       cwd: clonePath,
       prompt: renderPrompt('fixer', {
         guidePath: guide.guidePath,
@@ -125,10 +153,16 @@ async function writeGuide(
       }),
       tools: allowedTools(site, home),
       schema: guideSchema,
-      home,
+      ...claude('fixer'),
     })
+    // A moved guide would leave the first draft in the commit.
+    if (path.normalize(fixedGuide.guidePath) !== path.normalize(guide.guidePath)) {
+      throw new SiteFailure(`fixer moved the guide from ${guide.guidePath} to ${fixedGuide.guidePath}`)
+    }
+    // The PR marker records the keyword that was chosen and reviewed.
+    guide = { ...fixedGuide, keyword: guide.keyword, slug: guide.slug }
     guideFile(clonePath, guide)
-    await checkChanges(exec, clonePath)
+    await checkChanges(exec, clonePath, 'Claude')
     fixed.push(...review.issues)
   }
   return { guide, chosen, fixed }
@@ -136,38 +170,65 @@ async function writeGuide(
 
 async function runSite(config: Config, deps: Deps, due: DueSite, dryRun: boolean): Promise<SiteOutcome> {
   const { site } = due
-  const { exec, log } = deps
-  const covered = [
-    ...(await sitemapSlugs(deps.fetchText, site.domain)),
+  const { exec } = deps
+  let covered = [
+    ...(await sitemapSlugs(deps.fetchText, site.domain, deps.log)),
     ...due.prs.map((pr) => pr.keyword).filter((k): k is string => Boolean(k)),
   ]
-  const candidates = shortlist(due.gaps, due.ideas, covered)
-  if (candidates.length === 0) return { domain: site.domain, status: 'skipped', reason: 'no candidates' }
+  const noCandidates: SiteOutcome = { domain: site.domain, status: 'skipped', reason: 'no candidates' }
+  if (shortlist(due.gaps, due.ideas, covered).length === 0) return noCandidates
 
   let clonePath: string | undefined
   try {
     clonePath = await cloneSite(exec, site, config.workDir, deps.now())
+    const removeClone = () => fs.rmSync(clonePath!, { recursive: true, force: true })
     if (!hasGuideTemplate(clonePath, site)) {
-      fs.rmSync(clonePath, { recursive: true, force: true })
+      removeClone()
       return { domain: site.domain, status: 'skipped', reason: 'no exampleGuide or instructionsFile in repo' }
     }
+    covered = [...new Set([...covered, ...repoSlugs(clonePath)])]
+    const candidates = shortlist(due.gaps, due.ideas, covered)
+    if (candidates.length === 0) {
+      removeClone()
+      return noCandidates
+    }
 
-    const { guide, chosen, fixed } = await writeGuide(deps, site, clonePath, candidates, covered)
+    const { guide, chosen, fixed } = await writeGuide(config, deps, site, clonePath, candidates, covered)
 
     const build = await runBuild(exec, clonePath, site)
     if (!build.ok) throw new SiteFailure(`build failed:\n${build.output.slice(-2000)}`)
+    // The build runs repo code, and everything it leaves is committed.
+    await checkChanges(exec, clonePath, 'the build')
     if (!hasSourcesSection(fs.readFileSync(guideFile(clonePath, guide), 'utf8'))) {
       throw new SiteFailure(`guide ${guide.guidePath} has no Sources section`)
     }
 
     if (dryRun) return { domain: site.domain, status: 'dry-run', clonePath }
 
+    // Another run, or a person, may have opened a guide PR while this one wrote.
+    const open = (await listGuidePrs(exec, site.repo)).find((pr) => pr.state === 'OPEN')
+    if (open) {
+      removeClone()
+      return { domain: site.domain, status: 'skipped', reason: `guide PR #${open.number} opened while this run was writing` }
+    }
+
     const branch = `seo-guide/${branchSlug(guide.slug) || branchSlug(guide.keyword)}`
     const title = `Add guide: ${guide.title}`
+    await ensureLabel(exec, site.repo)
     await commitAndPush(exec, clonePath, branch, title)
-    const prUrl = await openPr(exec, site, branch, title, renderPrBody({ site, guide, chosen, shortlist: candidates, fixed }))
-    fs.rmSync(clonePath, { recursive: true, force: true })
-    log(`${site.domain}: opened ${prUrl}`)
+    let prUrl: string
+    try {
+      prUrl = await openPr(exec, site, branch, title, renderPrBody({ site, guide, chosen, shortlist: candidates, fixed }))
+    } catch (err) {
+      // A pushed branch with no PR is invisible to the next run, and its push
+      // of the same branch would be rejected.
+      const cleanup = await deleteRemoteBranch(exec, clonePath, branch).then(
+        () => '',
+        (e: Error) => `; the pushed branch ${branch} is still on GitHub: ${e.message}`,
+      )
+      throw new SiteFailure(`${(err as Error).message}${cleanup}`)
+    }
+    removeClone()
     return { domain: site.domain, status: 'opened', prUrl }
   } catch (err) {
     return { domain: site.domain, status: 'failed', reason: (err as Error).message, clonePath }
@@ -179,7 +240,7 @@ export async function runAll(
   deps: Deps,
   opts: { site?: string; dryRun: boolean },
 ): Promise<{ outcomes: SiteOutcome[]; exitCode: 0 | 1 }> {
-  const { exec, log } = deps
+  const { log } = deps
 
   const sites = opts.site ? config.sites.filter((s) => s.domain === opts.site) : config.sites
   if (sites.length === 0) {
@@ -188,18 +249,34 @@ export async function runAll(
   }
 
   try {
-    await preflight(exec)
+    await preflight(deps.exec)
   } catch (err) {
     log((err as Error).message)
     return { outcomes: [], exitCode: 1 }
   }
 
+  const lock = acquireLock(config.workDir, deps.now())
+  if (!lock.acquired) {
+    log(`another seo-driver run (${lock.holder}) is still going; exiting`)
+    return { outcomes: [], exitCode: 1 }
+  }
+  try {
+    const outcomes = sortLike(sites, await runLocked(config, deps, sites, opts.dryRun))
+    return { outcomes, exitCode: outcomes.some((o) => o.status === 'failed') ? 1 : 0 }
+  } finally {
+    lock.release()
+  }
+}
+
+async function runLocked(config: Config, deps: Deps, sites: SiteConfig[], dryRun: boolean): Promise<SiteOutcome[]> {
+  const { exec, log } = deps
   const outcomes: SiteOutcome[] = []
+  const failures = readFailures(config.workDir)
   const dueSites: DueSite[] = []
   for (const site of sites) {
     try {
       const prs = await listGuidePrs(exec, site.repo)
-      const check = dueCheck(site, prs, deps.now())
+      const check = dueCheck(site, prs, deps.now(), failures[site.domain])
       if (check.due) dueSites.push({ site, prs, gaps: [], ideas: [] })
       else outcomes.push({ domain: site.domain, status: 'skipped', reason: check.reason })
     } catch (err) {
@@ -207,28 +284,40 @@ export async function runAll(
     }
   }
 
-  // Fetch Google data for every due site before writing anything: Keyword
-  // Planner is required, so a credential problem must stop the whole run.
-  for (const due of dueSites) {
+  // Fetch Google data for every due site before writing anything. Keyword
+  // Planner is required and its failure is a credential problem, so it stops
+  // the whole run. Search Console is per property, so it fails only its site.
+  const ready: DueSite[] = []
+  for (const [i, due] of dueSites.entries()) {
     try {
-      due.gaps = await fetchSearchGaps(exec, due.site, deps.now())
       due.ideas = await fetchKeywordIdeas(exec, due.site, config.keywordPlanner)
     } catch (err) {
-      const reason =
-        err instanceof GumError
-          ? `${err.opId} failed: ${[err.errorCode, err.message].filter(Boolean).join(' ')}`
-          : (err as Error).message
+      const reason = describeError(err)
       log(`${due.site.domain}: ${reason}`)
-      log('stopping: Google data is required before any guide is written')
-      for (const d of dueSites) outcomes.push({ domain: d.site.domain, status: 'failed', reason })
-      return { outcomes: sortLike(sites, outcomes), exitCode: 1 }
+      log('stopping: Keyword Planner data is required before any guide is written')
+      for (const d of [...ready, ...dueSites.slice(i)]) outcomes.push({ domain: d.site.domain, status: 'failed', reason })
+      return outcomes
     }
+    try {
+      due.gaps = await fetchSearchGaps(exec, due.site, deps.now(), config.searchConsole.country)
+    } catch (err) {
+      const reason = describeError(err)
+      log(`${due.site.domain}: ${reason}`)
+      outcomes.push({ domain: due.site.domain, status: 'failed', reason })
+      continue
+    }
+    ready.push(due)
   }
 
-  for (const due of dueSites) outcomes.push(await runSite(config, deps, due, opts.dryRun))
-
-  const sorted = sortLike(sites, outcomes)
-  return { outcomes: sorted, exitCode: sorted.some((o) => o.status === 'failed') ? 1 : 0 }
+  for (const due of ready) {
+    const outcome = await runSite(config, deps, due, dryRun)
+    // A failed site waits out its interval, since most failures come after
+    // the Claude runs that would repeat. A dry run is a manual test and
+    // records nothing.
+    if (outcome.status === 'failed' && !dryRun) recordFailure(config.workDir, due.site.domain, deps.now())
+    outcomes.push(outcome)
+  }
+  return outcomes
 }
 
 function sortLike(sites: SiteConfig[], outcomes: SiteOutcome[]): SiteOutcome[] {

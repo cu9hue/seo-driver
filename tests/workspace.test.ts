@@ -7,6 +7,7 @@ import {
   changedFiles,
   cloneSite,
   commitAndPush,
+  deleteRemoteBranch,
   hasGuideTemplate,
   hasSourcesSection,
   protectedChanges,
@@ -34,6 +35,16 @@ describe('cloneSite', () => {
     ])
   })
 
+  test('removes older clones of the same site only', async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-work-'))
+    for (const dir of ['mixingpal.com-20261020070000', 'mixingpal.com.au-20261020070000', 'other.com-20261020070000', 'mixingpal.com-notes']) {
+      fs.mkdirSync(path.join(workDir, dir))
+    }
+    const exec = fakeExec([{ match: is('gh', 'repo', 'clone'), result: {} }])
+    await cloneSite(exec, site, workDir, new Date('2026-10-24T08:30:00Z'))
+    expect(fs.readdirSync(workDir).sort()).toEqual(['mixingpal.com-notes', 'mixingpal.com.au-20261020070000', 'other.com-20261020070000'])
+  })
+
   test('throws when the clone fails', async () => {
     const exec = fakeExec([{ match: is('gh', 'repo', 'clone'), result: { code: 1, stderr: 'repository not found' } }])
     await expect(cloneSite(exec, site, '/work', new Date())).rejects.toThrow('repository not found')
@@ -53,11 +64,42 @@ describe('hasGuideTemplate', () => {
 })
 
 describe('changedFiles', () => {
-  test('returns paths from porcelain status', async () => {
-    const exec = fakeExec([
-      { match: is('git', 'status'), result: { stdout: ' M index.html\n?? arrange-song/index.html\n M public/sitemap.xml\n' } },
+  test('lists every untracked file, unquoted, including both sides of a rename', async () => {
+    const stdout = [
+      ' M index.html',
+      '?? newpkg/package.json',
+      '?? .github/workflows/a b.yml',
+      'R  renamed.html',
+      'package.json',
+      '',
+    ].join('\0')
+    const exec = fakeExec([{ match: is('git', 'status'), result: { stdout } }])
+    expect(await changedFiles(exec, '/clone')).toEqual([
+      'index.html',
+      'newpkg/package.json',
+      '.github/workflows/a b.yml',
+      'renamed.html',
+      'package.json',
     ])
-    expect(await changedFiles(exec, '/clone')).toEqual(['index.html', 'arrange-song/index.html', 'public/sitemap.xml'])
+    expect(exec.calls[0].args).toEqual(['status', '--porcelain', '-uall', '-z'])
+    expect(exec.calls[0].opts?.cwd).toBe('/clone')
+  })
+
+  test('a real repo: a new folder holding package.json is caught', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-repo-'))
+    const { realExec } = await import('../src/exec.js')
+    await realExec('git', ['init', '-q'], { cwd: repo })
+    fs.mkdirSync(path.join(repo, 'newpkg'))
+    fs.writeFileSync(path.join(repo, 'newpkg', 'package.json'), '{}')
+    expect(protectedChanges(await changedFiles(realExec, repo))).toEqual(['newpkg/package.json'])
+  })
+})
+
+describe('deleteRemoteBranch', () => {
+  test('deletes the pushed branch without running hooks', async () => {
+    const exec = fakeExec([{ match: is('git', 'push'), result: {} }])
+    await deleteRemoteBranch(exec, '/clone', 'seo-guide/arrange-song')
+    expect(exec.calls[0].args).toEqual(['push', '--no-verify', 'origin', '--delete', 'seo-guide/arrange-song'])
     expect(exec.calls[0].opts?.cwd).toBe('/clone')
   })
 })
@@ -92,7 +134,7 @@ describe('runBuild', () => {
       ['npm', 'ci'],
       ['npm', 'run', 'build'],
     ])
-    expect(exec.calls.every((c) => c.opts?.cwd === '/clone')).toBe(true)
+    expect(exec.calls.every((c) => c.opts?.cwd === '/clone' && c.opts?.timeoutMs === 15 * 60 * 1000)).toBe(true)
   })
 
   test('stops at the first failing command and returns its output', async () => {
@@ -113,7 +155,12 @@ describe('hasSourcesSection', () => {
     ['<h3 class="x">sources</h3>', true],
     ['<h2>\n  Sources\n</h2>', true],
     ['## Sources\n', true],
+    ['<h2 id="sources"><a href="#sources">Sources</a></h2>', true],
+    ['<h2><span class="step-kicker">Notes</span> Sources</h2>', false],
+    ['<h2>Sources and further reading</h2>', true],
+    ['## Sources and further reading\n', true],
     ['<h2>Resources</h2>', false],
+    ['<h2>Sourcing samples</h2>', false],
     ['<p>Sources: none</p>', false],
   ])('%s → %s', (html, expected) => {
     expect(hasSourcesSection(html)).toBe(expected)

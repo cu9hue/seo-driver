@@ -10,7 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').cpSync('src/prompts', 'dist/prompts', { recursive: true })\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

@@ -15,3 +15,14 @@ export interface Config {
   keywordPlanner: { customerId?: string; geoTargetConstants: string[]; language: string }
   sites: SiteConfig[]
 }
+
+export interface Candidate {
+  keyword: string
+  source: 'search-console' | 'keyword-planner'
+  score: number
+  impressions?: number
+  clicks?: number
+  position?: number
+  avgMonthlySearches?: number
+  competition?: string
+}

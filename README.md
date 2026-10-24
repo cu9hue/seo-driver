@@ -21,7 +21,7 @@ On the machine that runs it (macOS or Ubuntu, amd64 or arm64):
 
 - Node 22 or later.
 - [gum](https://github.com/ehmo/gum/releases) v2.3.1 or later: `curl -fsSL https://raw.githubusercontent.com/ehmo/gum/main/install.sh | bash`.
-- [`gh`](https://cli.github.com/), logged in with push access to every site repo: `gh auth login`.
+- [`gh`](https://cli.github.com/), logged in with push access to every site repo: `gh auth login`, then `gh auth setup-git` so `git push` uses the same login. On a headless box this step is easy to miss, and the push fails only after every Claude run.
 - `git`, with `user.name` and `user.email` set.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in.
 - Your `writing` skill at `~/.claude/skills/writing`.
@@ -77,14 +77,14 @@ Each site entry:
 | --- | --- | --- |
 | `domain` | yes | `mixingpal.com` |
 | `repo` | yes | GitHub `owner/name` |
-| `buildCommands` | yes | Commands that build the site, run without a shell, e.g. `["npm ci", "npm run build"]`. Claude may run exactly these and nothing else. |
+| `buildCommands` | yes | Commands that build the site, run without a shell, e.g. `["npm ci", "npm run build"]`. These are the only commands Claude is allowed to run. |
 | `exampleGuide` or `instructionsFile` | one of them | Repo path of an existing guide for Claude to copy, or of a file explaining how to add one. A site with neither is skipped. |
 | `searchConsoleProperty` | no | `sc-domain:mixingpal.com` for a domain property, `https://mixingpal.com/` for a URL-prefix property. |
 | `seedKeywords` | no | Up to 20 Keyword Planner seeds. The site URL is always a seed. |
 | `baseBranch` | no | Default `main`. |
 | `intervalDays` | no | Default `2`. |
 
-`keywordPlanner.geoTargetConstants` and `keywordPlanner.language` default to the US (`2840`) and English (`1000`). `workDir` (default `~/.cache/seo-driver`) holds the clones.
+`keywordPlanner.geoTargetConstants` and `keywordPlanner.language` default to the US (`2840`) and English (`1000`). `workDir` (default `~/.cache/seo-driver`) holds the clones. A relative `workDir` is taken from the config file's folder.
 
 ## Run
 
@@ -110,7 +110,16 @@ Scheduling is yours. For example, a daily cron entry:
 
 ## What Claude can do
 
-The script makes every gum, `git push`, and `gh` call itself. Claude runs with `--permission-mode default`, loads only your user settings, and gets this allowlist: read and edit files inside the clone, search and fetch the web, use the `writing` skill, and run the site's `buildCommands`. `git`, `gh`, and `gum` are denied outright. The reviewer can only read and research.
+The script makes every gum, `git push`, and `gh` call itself. Claude runs headless with:
+
+- `--permission-mode default`, which overrides a `defaultMode` in your settings;
+- only your user settings, so `.claude/` settings inside a site repo are ignored;
+- your hooks turned off, so a hook can't rewrite or approve its commands;
+- this allowlist: read and edit files inside the clone, read the `writing` skill, search and fetch the web, and run the site's `buildCommands`.
+
+`git`, `gh`, `gum`, and edits under `.git/` are denied outright. The reviewer can only read and research. A site fails, with no push, when Claude changes anything under `.github/`, a `package.json`, a lockfile, or `.npmrc`. The script's own commit and push skip git hooks.
+
+**What this does not stop.** Claude has to edit the site's code (for Mixing Pal, `vite.config.ts`), and the build commands run that code as you, with your GitHub login on the machine. A web page Claude reads could try to trick it into planting code that runs during the build. The guards above close the obvious paths, not this one. To close it, run seo-driver as a separate user or in a container that holds only a GitHub token scoped to the site repos.
 
 ## Develop
 

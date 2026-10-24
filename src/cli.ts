@@ -1,0 +1,74 @@
+#!/usr/bin/env node
+import fs from 'node:fs'
+import os from 'node:os'
+import { pathToFileURL } from 'node:url'
+import { parseArgs } from 'node:util'
+import { loadConfig } from './config.js'
+import { realFetchText } from './covered.js'
+import { realExec } from './exec.js'
+import { runAll, type Deps, type SiteOutcome } from './pipeline.js'
+
+const USAGE = 'usage: seo-driver run [--config <path>] [--site <domain>] [--dry-run]'
+
+function describe(outcome: SiteOutcome): string {
+  switch (outcome.status) {
+    case 'opened':
+      return `${outcome.domain}: opened ${outcome.prUrl}`
+    case 'skipped':
+      return `${outcome.domain}: skipped (${outcome.reason})`
+    case 'dry-run':
+      return `${outcome.domain}: dry-run, guide ready in ${outcome.clonePath}`
+    case 'failed':
+      return `${outcome.domain}: failed (${outcome.reason})${outcome.clonePath ? `, clone kept at ${outcome.clonePath}` : ''}`
+  }
+}
+
+export async function main(argv: string[], deps: Deps): Promise<number> {
+  let parsed
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        config: { type: 'string', default: 'seo-driver.config.json' },
+        site: { type: 'string' },
+        'dry-run': { type: 'boolean', default: false },
+      },
+    })
+  } catch (err) {
+    deps.log(`${(err as Error).message}\n${USAGE}`)
+    return 1
+  }
+  if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'run') {
+    deps.log(USAGE)
+    return 1
+  }
+
+  let config
+  try {
+    config = loadConfig(parsed.values.config)
+  } catch (err) {
+    deps.log((err as Error).message)
+    return 1
+  }
+
+  const { outcomes, exitCode } = await runAll(config, deps, {
+    site: parsed.values.site,
+    dryRun: parsed.values['dry-run'],
+  })
+  for (const outcome of outcomes) deps.log(describe(outcome))
+  return exitCode
+}
+
+// npm links the bin through a symlink, so compare real paths.
+const invoked = process.argv[1] && pathToFileURL(fs.realpathSync(process.argv[1])).href === import.meta.url
+if (invoked) {
+  const deps: Deps = {
+    exec: realExec,
+    fetchText: realFetchText,
+    now: () => new Date(),
+    home: os.homedir(),
+    log: (line) => console.log(line),
+  }
+  main(process.argv.slice(2), deps).then((code) => process.exit(code))
+}

@@ -1,0 +1,24 @@
+{
+  "keywordPlanner": {
+    "geoTargetConstants": ["2840"],
+    "language": "1000"
+  },
+  "sites": [
+    {
+      "domain": "mixingpal.com",
+      "repo": "antithetical-labs/mixing-pal-landing",
+      "baseBranch": "main",
+      "intervalDays": 2,
+      "searchConsoleProperty": "sc-domain:mixingpal.com",
+      "seedKeywords": [
+        "ableton arrangement",
+        "how to finish a song",
+        "stuck on an 8 bar loop",
+        "ableton live tips",
+        "how to structure a song"
+      ],
+      "buildCommands": ["npm ci", "npm run build"],
+      "exampleGuide": "how-to-arrange-a-song/index.html"
+    }
+  ]
+}

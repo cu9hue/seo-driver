@@ -1,33 +1,28 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import type { Exec } from './exec.js'
 import type { SiteConfig } from './types.js'
 
 const RESEARCH_TOOLS = ['Glob', 'Grep', 'WebSearch', 'WebFetch', 'Skill']
-const writingSkill = (home: string) => `Read(${home}/.claude/skills/writing/**)`
+const writingSkillDir = (home: string) => path.join(home, '.claude', 'skills', 'writing')
 
-export function allowedTools(site: SiteConfig, home: string): string[] {
-  return [
-    'Read(./**)',
-    'Edit(./**)',
-    'Write(./**)',
-    ...RESEARCH_TOOLS,
-    writingSkill(home),
-    ...site.buildCommands.map((c) => `Bash(${c})`),
-  ]
+export function allowedTools(site: SiteConfig, _home: string): string[] {
+  return ['Read(./**)', 'Edit(./**)', 'Write(./**)', ...RESEARCH_TOOLS, ...site.buildCommands.map((c) => `Bash(${c})`)]
 }
 
-export function reviewerTools(_site: SiteConfig, home: string): string[] {
-  return ['Read(./**)', ...RESEARCH_TOOLS, writingSkill(home)]
+export function reviewerTools(_site: SiteConfig, _home: string): string[] {
+  return ['Read(./**)', ...RESEARCH_TOOLS]
 }
 
-// Deny rules win over any allow rule in the user's own settings.
+// Deny rules win over any allow rule in the user's own settings. Edits under
+// .git could plant hooks or config that the script's own git calls would run.
 export function deniedTools(): string[] {
-  return ['Bash(git *)', 'Bash(gh *)', 'Bash(gum *)']
+  return ['Bash(git *)', 'Bash(gh *)', 'Bash(gum *)', 'Edit(./.git/**)', 'Write(./.git/**)']
 }
 
 export async function runClaude<T>(
   exec: Exec,
-  opts: { cwd: string; prompt: string; tools: string[]; schema: object },
+  opts: { cwd: string; prompt: string; tools: string[]; schema: object; home: string },
 ): Promise<T> {
   const result = await exec(
     'claude',
@@ -39,6 +34,12 @@ export async function runClaude<T>(
       '--permission-mode', 'default',
       // Ignore .claude/ settings inside the cloned site repo.
       '--setting-sources', 'user',
+      // User hooks can rewrite commands (so they stop matching the allowlist)
+      // or approve them, so none run here.
+      '--settings', JSON.stringify({ disableAllHooks: true }),
+      // Lets Claude read the writing skill's reference files; edits there are
+      // still outside the Edit(./**) allowlist.
+      '--add-dir', writingSkillDir(opts.home),
       '--allowedTools', opts.tools.join(','),
       '--disallowedTools', deniedTools().join(','),
     ],

@@ -77,6 +77,7 @@ async function writeGuide(
     }),
     tools: allowedTools(site, home),
     schema: guideSchema,
+    home,
   })
 
   const chosen = candidates.find((c) => sameWords(c.keyword, guide.keyword))
@@ -92,6 +93,7 @@ async function writeGuide(
       prompt: renderPrompt('reviewer', { guidePath: guide.guidePath, keyword: guide.keyword, covered: coveredList }),
       tools: reviewerTools(site, home),
       schema: reviewSchema,
+      home,
     })
     if (review.pass && review.issues.length === 0) break
     if (round === MAX_FIX_ROUNDS) {
@@ -108,6 +110,7 @@ async function writeGuide(
       }),
       tools: allowedTools(site, home),
       schema: guideSchema,
+      home,
     })
     guideFile(clonePath, guide)
     fixed.push(...review.issues)

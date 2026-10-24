@@ -18,7 +18,6 @@ describe('allowedTools', () => {
     const tools = allowedTools(site, '/home/u')
     expect(tools).toContain('Edit(./**)')
     expect(tools).toContain('WebFetch')
-    expect(tools).toContain('Read(/home/u/.claude/skills/writing/**)')
     expect(tools).toContain('Bash(npm ci)')
     expect(tools).toContain('Bash(npm run build)')
     expect(tools.some((t) => /^Bash\((git|gh|gum)\b/.test(t))).toBe(false)
@@ -33,6 +32,10 @@ describe('allowedTools', () => {
 
   test('denies git, gh and gum outright', () => {
     expect(deniedTools()).toEqual(expect.arrayContaining(['Bash(git *)', 'Bash(gh *)', 'Bash(gum *)']))
+  })
+
+  test('denies edits inside .git, where hooks and config would run as the user', () => {
+    expect(deniedTools()).toEqual(expect.arrayContaining(['Edit(./.git/**)', 'Write(./.git/**)']))
   })
 })
 
@@ -51,6 +54,7 @@ describe('runClaude', () => {
       prompt: 'review it',
       tools: ['Read(./**)', 'WebFetch'],
       schema,
+      home: '/home/u',
     })
     expect(result).toEqual({ pass: true, issues: [] })
     const call = exec.calls[0]
@@ -63,23 +67,28 @@ describe('runClaude', () => {
     expect(args[args.indexOf('--allowedTools') + 1]).toBe('Read(./**),WebFetch')
     expect(args[args.indexOf('--disallowedTools') + 1]).toBe(deniedTools().join(','))
     expect(args).not.toContain('--dangerously-skip-permissions')
+    // User hooks (e.g. a command-rewriting PreToolUse hook) must not run or
+    // change commands inside the allowlist.
+    expect(JSON.parse(args[args.indexOf('--settings') + 1])).toEqual({ disableAllHooks: true })
+    // The writing skill's reference files sit outside the clone.
+    expect(args[args.indexOf('--add-dir') + 1]).toBe('/home/u/.claude/skills/writing')
   })
 
   test('throws when is_error is true', async () => {
     const exec = fakeExec([
       { match: is('claude', '-p'), result: { stdout: JSON.stringify({ is_error: true, result: 'max turns reached' }) } },
     ])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema })).rejects.toThrow('max turns reached')
+    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('max turns reached')
   })
 
   test('throws when structured_output is missing', async () => {
     const exec = fakeExec([{ match: is('claude', '-p'), result: { stdout: JSON.stringify({ is_error: false, result: 'done' }) } }])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema })).rejects.toThrow('structured_output')
+    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('structured_output')
   })
 
   test('throws when claude exits non-zero', async () => {
     const exec = fakeExec([{ match: is('claude', '-p'), result: { code: 1, stderr: 'not logged in' } }])
-    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema })).rejects.toThrow('not logged in')
+    await expect(runClaude(exec, { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h' })).rejects.toThrow('not logged in')
   })
 })
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { allowedTools, guideSchema, renderPrompt, reviewerTools, reviewSchema, runClaude } from './claude.js'
+import { guideSchema, renderPrompt, REVIEWER_TOOLS, reviewSchema, runClaude, WRITER_TOOLS, writingSkillDir } from './claude.js'
 import { repoSlugs, sitemapSlugs, type FetchText } from './covered.js'
 import type { Exec } from './exec.js'
 import {
@@ -24,6 +24,7 @@ import {
   cloneSite,
   commitAndPush,
   deleteRemoteBranch,
+  existsInBase,
   hasGuideTemplate,
   hasSourcesSection,
   protectedChanges,
@@ -107,6 +108,8 @@ async function writeGuide(
       })()
     : ''
 
+  const writingSkill = writingSkillDir(home)
+
   log(`${site.domain}: writing a guide from ${candidates.length} candidates`)
   let guide = await runClaude<GuideResult>(exec, {
     cwd: clonePath,
@@ -117,41 +120,31 @@ async function writeGuide(
       exampleGuide: site.exampleGuide ?? '(none: follow the site-specific instructions below)',
       instructions,
       buildCommands,
+      writingSkill,
     }),
-    tools: allowedTools(site, home),
+    tools: WRITER_TOOLS,
     schema: guideSchema,
     ...claude('writer'),
   })
 
   const chosen = candidates.find((c) => sameWords(c.keyword, guide.keyword))
   if (!chosen) throw new SiteFailure(`writer picked "${guide.keyword}", which is not on the shortlist`)
-  guideFile(clonePath, guide)
+  const relPath = path.relative(clonePath, guideFile(clonePath, guide)).split(path.sep).join('/')
+  if (await existsInBase(exec, clonePath, relPath)) {
+    throw new SiteFailure(`guide ${relPath} is an existing page; the writer must add a new one`)
+  }
   await checkChanges(exec, clonePath, 'Claude')
 
-  const fixed: ReviewIssue[] = []
-  for (let round = 0; ; round++) {
-    log(`${site.domain}: reviewing "${guide.keyword}" (round ${round + 1})`)
-    const review = await runClaude<{ pass: boolean; issues: ReviewIssue[] }>(exec, {
-      cwd: clonePath,
-      prompt: renderPrompt('reviewer', { guidePath: guide.guidePath, keyword: guide.keyword, covered: coveredList }),
-      tools: reviewerTools(site, home),
-      schema: reviewSchema,
-      ...claude('reviewer'),
-    })
-    if (review.pass && review.issues.length === 0) break
-    if (round === MAX_FIX_ROUNDS) {
-      const kinds = [...new Set(review.issues.map((i) => i.kind))].join(', ') || 'unlisted'
-      throw new SiteFailure(`review still failing after ${MAX_FIX_ROUNDS} fix rounds: ${kinds}`)
-    }
-    log(`${site.domain}: fixing ${review.issues.length} review issues`)
+  const fix = async (issues: ReviewIssue[]) => {
     const fixedGuide = await runClaude<GuideResult>(exec, {
       cwd: clonePath,
       prompt: renderPrompt('fixer', {
         guidePath: guide.guidePath,
-        issues: JSON.stringify(review.issues, null, 2),
+        issues: JSON.stringify(issues, null, 2),
         buildCommands,
+        writingSkill,
       }),
-      tools: allowedTools(site, home),
+      tools: WRITER_TOOLS,
       schema: guideSchema,
       ...claude('fixer'),
     })
@@ -163,6 +156,42 @@ async function writeGuide(
     guide = { ...fixedGuide, keyword: guide.keyword, slug: guide.slug }
     guideFile(clonePath, guide)
     await checkChanges(exec, clonePath, 'Claude')
+  }
+
+  // Claude cannot run commands, so the script builds after each Claude edit,
+  // once the protected-file check has passed, and sends failures back.
+  const buildOrFix = async () => {
+    for (let round = 0; ; round++) {
+      const build = await runBuild(exec, clonePath, site)
+      // The build runs repo code, and everything it leaves is committed.
+      await checkChanges(exec, clonePath, 'the build')
+      if (build.ok) return
+      const tail = build.output.slice(-2000)
+      if (round === MAX_FIX_ROUNDS) throw new SiteFailure(`build failed:\n${tail}`)
+      log(`${site.domain}: build failed; sending the errors to the fixer`)
+      await fix([{ kind: 'build', location: 'build', detail: tail }])
+    }
+  }
+
+  await buildOrFix()
+  const fixed: ReviewIssue[] = []
+  for (let round = 0; ; round++) {
+    log(`${site.domain}: reviewing "${guide.keyword}" (round ${round + 1})`)
+    const review = await runClaude<{ pass: boolean; issues: ReviewIssue[] }>(exec, {
+      cwd: clonePath,
+      prompt: renderPrompt('reviewer', { guidePath: guide.guidePath, keyword: guide.keyword, covered: coveredList, writingSkill }),
+      tools: REVIEWER_TOOLS,
+      schema: reviewSchema,
+      ...claude('reviewer'),
+    })
+    if (review.pass && review.issues.length === 0) break
+    if (round === MAX_FIX_ROUNDS) {
+      const kinds = [...new Set(review.issues.map((i) => i.kind))].join(', ') || 'unlisted'
+      throw new SiteFailure(`review still failing after ${MAX_FIX_ROUNDS} fix rounds: ${kinds}`)
+    }
+    log(`${site.domain}: fixing ${review.issues.length} review issues`)
+    await fix(review.issues)
+    await buildOrFix()
     fixed.push(...review.issues)
   }
   return { guide, chosen, fixed }
@@ -194,11 +223,6 @@ async function runSite(config: Config, deps: Deps, due: DueSite, dryRun: boolean
     }
 
     const { guide, chosen, fixed } = await writeGuide(config, deps, site, clonePath, candidates, covered)
-
-    const build = await runBuild(exec, clonePath, site)
-    if (!build.ok) throw new SiteFailure(`build failed:\n${build.output.slice(-2000)}`)
-    // The build runs repo code, and everything it leaves is committed.
-    await checkChanges(exec, clonePath, 'the build')
     if (!hasSourcesSection(fs.readFileSync(guideFile(clonePath, guide), 'utf8'))) {
       throw new SiteFailure(`guide ${guide.guidePath} has no Sources section`)
     }
@@ -212,7 +236,8 @@ async function runSite(config: Config, deps: Deps, due: DueSite, dryRun: boolean
       return { domain: site.domain, status: 'skipped', reason: `guide PR #${open.number} opened while this run was writing` }
     }
 
-    const branch = `seo-guide/${branchSlug(guide.slug) || branchSlug(guide.keyword)}`
+    // A slug and keyword with no Latin letters or digits would leave the branch name empty.
+    const branch = `seo-guide/${branchSlug(guide.slug) || branchSlug(guide.keyword) || `guide-${deps.now().toISOString().slice(0, 10)}`}`
     const title = `Add guide: ${guide.title}`
     await ensureLabel(exec, site.repo)
     await commitAndPush(exec, clonePath, branch, title)
@@ -261,14 +286,20 @@ export async function runAll(
     return { outcomes: [], exitCode: 1 }
   }
   try {
-    const outcomes = sortLike(sites, await runLocked(config, deps, sites, opts.dryRun))
+    const outcomes = sortLike(sites, await runLocked(config, deps, sites, opts.dryRun, lock.refresh))
     return { outcomes, exitCode: outcomes.some((o) => o.status === 'failed') ? 1 : 0 }
   } finally {
     lock.release()
   }
 }
 
-async function runLocked(config: Config, deps: Deps, sites: SiteConfig[], dryRun: boolean): Promise<SiteOutcome[]> {
+async function runLocked(
+  config: Config,
+  deps: Deps,
+  sites: SiteConfig[],
+  dryRun: boolean,
+  refreshLock: (now: Date) => void,
+): Promise<SiteOutcome[]> {
   const { exec, log } = deps
   const outcomes: SiteOutcome[] = []
   const failures = readFailures(config.workDir)
@@ -310,6 +341,8 @@ async function runLocked(config: Config, deps: Deps, sites: SiteConfig[], dryRun
   }
 
   for (const due of ready) {
+    // One site takes a few hours at most, so a run of many sites stays fresh.
+    refreshLock(deps.now())
     const outcome = await runSite(config, deps, due, dryRun)
     // A failed site waits out its interval, since most failures come after
     // the Claude runs that would repeat. A dry run is a manual test and

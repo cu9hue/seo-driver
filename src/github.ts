@@ -24,7 +24,7 @@ export interface GuideResult {
 }
 
 export interface ReviewIssue {
-  kind: 'unsourced-claim' | 'wrong-claim' | 'slop' | 'overlap' | 'other'
+  kind: 'unsourced-claim' | 'wrong-claim' | 'slop' | 'overlap' | 'other' | 'build'
   location: string
   detail: string
 }
@@ -80,6 +80,10 @@ function describeNumbers(c: Candidate): string {
   return `Keyword Planner: ${c.avgMonthlySearches ?? 0} searches a month, ${c.competition ?? 'unknown'} competition`
 }
 
+// Search text comes from anyone who can make a query appear, so it is shown
+// as code: no @mentions, links or formatting.
+const inert = (text: string) => `\`${text.replace(/`/g, '')}\``
+
 const bullets = (items: string[], empty: string) => (items.length ? items.map((i) => `- ${i}`).join('\n') : empty)
 
 export function renderPrBody(input: {
@@ -90,11 +94,11 @@ export function renderPrBody(input: {
   fixed: ReviewIssue[]
 }): string {
   const { guide, chosen, shortlist, fixed } = input
-  const runnerUps = shortlist.filter((c) => c !== chosen).map((c) => `${c.keyword} (${describeNumbers(c)})`)
+  const runnerUps = shortlist.filter((c) => c !== chosen).map((c) => `${inert(c.keyword)} (${describeNumbers(c)})`)
   return [
     `<!-- seo-driver keyword: ${guide.keyword} -->`,
     '## Target keyword',
-    `**${chosen.keyword}**`,
+    inert(chosen.keyword),
     describeNumbers(chosen),
     '## Why this one',
     guide.reason,

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { acquireLock, FAILURES_FILE, LOCK_FILE, readFailures, recordFailure } from '../src/runState.js'
+import { acquireLock, FAILURES_FILE, LOCK_FILE, readFailures, recordFailure, type Lock } from '../src/runState.js'
 
 const NOW = new Date('2026-10-24T07:00:00Z')
 const workDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-state-'))
@@ -45,6 +45,45 @@ describe('acquireLock', () => {
     const dir = workDir()
     fs.writeFileSync(path.join(dir, LOCK_FILE), '')
     expect(acquireLock(dir, new Date(), dead).acquired).toBe(false)
+  })
+
+  test('two runs taking over the same stale lock: only the first gets it', () => {
+    const dir = workDir()
+    writeLock(dir, 4242, '2026-10-24T06:30:00Z')
+    let first: Lock | undefined
+    // The second run finds the stale lock, and the first run takes it over
+    // while the second is still checking the dead pid.
+    const second = acquireLock(dir, NOW, () => {
+      first ??= acquireLock(dir, NOW, dead)
+      return false
+    })
+    expect(first?.acquired).toBe(true)
+    expect(second.acquired).toBe(false)
+    expect(JSON.parse(fs.readFileSync(path.join(dir, LOCK_FILE), 'utf8'))).toEqual({ pid: process.pid, startedAt: NOW.toISOString() })
+    expect(fs.readdirSync(dir)).toEqual([LOCK_FILE])
+  })
+
+  test('does not take a stale lock that another run is taking over', () => {
+    const dir = workDir()
+    writeLock(dir, 4242, '2026-10-24T06:30:00Z')
+    const lock = acquireLock(dir, NOW, () => {
+      // Another run holds the takeover claim for this lock.
+      const st = fs.statSync(path.join(dir, LOCK_FILE))
+      fs.writeFileSync(path.join(dir, `${LOCK_FILE}.takeover-${st.ino}-${Math.round(st.mtimeMs)}`), '')
+      return false
+    })
+    expect(lock.acquired).toBe(false)
+    expect(!lock.acquired && lock.holder).toContain('taking over the stale lock')
+    expect(fs.existsSync(path.join(dir, LOCK_FILE))).toBe(true)
+  })
+
+  test('refresh keeps a run that passes 12 hours from losing its lock', () => {
+    const dir = workDir()
+    const lock = acquireLock(dir, NOW, alive)
+    if (lock.acquired) lock.refresh(new Date('2026-10-24T18:00:00Z'))
+    expect(acquireLock(dir, new Date('2026-10-24T20:00:00Z'), alive).acquired).toBe(false)
+    if (lock.acquired) lock.release()
+    expect(fs.existsSync(path.join(dir, LOCK_FILE))).toBe(false)
   })
 
   test('release leaves a lock that another run took over', () => {

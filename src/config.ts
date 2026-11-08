@@ -5,8 +5,8 @@ import type { Config, SiteConfig } from './types.js'
 
 // Google's documented keywordSeed cap, which gum enforces.
 const MAX_SEED_KEYWORDS = 20
-// Build commands run without a shell, and each one becomes a Bash(<command>)
-// allow rule for Claude, where * is a wildcard.
+// Build commands are split on spaces and run without a shell, so shell syntax
+// would not do what it looks like.
 const SHELL_SYNTAX = /[&|;<>`$'"\\*?(){}[\]]|^\s*\w+=/
 
 export class ConfigError extends Error {}

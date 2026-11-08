@@ -5,7 +5,7 @@ Do not edit any file. Report problems only.
 Check three things:
 
 1. **Claims.** For every factual claim, find the source the guide cites for it and fetch that source with WebFetch. Report a claim as `unsourced-claim` when no cited source backs it, and as `wrong-claim` when the source says something different.
-2. **Slop.** Load the `writing` skill with the Skill tool and read its catalog of AI tells. Report each passage that breaks its anti-slop rules as `slop`: filler, restating, vague benefit lists, stock phrases, em dashes, hedging.
+2. **Slop.** Read `{{writingSkill}}/SKILL.md` and its catalog of AI tells in that folder. Report each passage that breaks its anti-slop rules as `slop`: filler, restating, vague benefit lists, stock phrases, em dashes, hedging.
 3. **Overlap.** Report `overlap` when the guide mostly repeats one of these existing topics:
 
 {{covered}}

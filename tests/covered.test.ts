@@ -2,7 +2,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { repoSlugs, sitemapSlugs, type FetchText } from '../src/covered.js'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { MAX_FETCH_BYTES, realFetchText, repoSlugs, sitemapSlugs, type FetchText } from '../src/covered.js'
 
 const urlset = (...locs: string[]) =>
   `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs
@@ -71,6 +73,32 @@ describe('sitemapSlugs', () => {
     expect(fetchText.urls).not.toContain('https://example.com/sitemap.xml')
   })
 
+  test('reads every sitemap robots.txt names', async () => {
+    const fetchText = fakeFetch({
+      'https://example.com/robots.txt': 'Sitemap: https://example.com/pages.xml\nSitemap: https://www.example.com/guides.xml\n',
+      'https://example.com/pages.xml': urlset('https://example.com/pricing/'),
+      'https://www.example.com/guides.xml': urlset('https://example.com/guide-one/'),
+    })
+    expect(await sitemapSlugs(fetchText, 'example.com', noLog)).toEqual(['pricing', 'guide-one'])
+  })
+
+  test('skips sitemaps on other hosts', async () => {
+    const fetchText = fakeFetch({
+      'https://example.com/robots.txt': 'Sitemap: http://192.168.1.1/admin.xml\n',
+      'https://example.com/sitemap.xml': index('https://evil.test/s.xml', 'https://example.com/a.xml'),
+      'https://example.com/a.xml': urlset('https://example.com/guide-one/'),
+    })
+    expect(await sitemapSlugs(fetchText, 'example.com', noLog)).toEqual(['guide-one'])
+    expect(fetchText.urls.filter((u) => !u.startsWith('https://example.com/'))).toEqual([])
+  })
+
+  test('reads at most 50 child sitemaps from an index', async () => {
+    const children = Array.from({ length: 60 }, (_, i) => `https://example.com/s-${i}.xml`)
+    const fetchText = fakeFetch({ 'https://example.com/sitemap.xml': index(...children) })
+    await sitemapSlugs(fetchText, 'example.com', noLog)
+    expect(fetchText.urls.filter((u) => u.includes('/s-')).length).toBe(50)
+  })
+
   test('falls back to sitemap-index.xml', async () => {
     const fetchText = fakeFetch({
       'https://example.com/sitemap-index.xml': index('https://example.com/sitemap-0.xml'),
@@ -92,6 +120,37 @@ describe('sitemapSlugs', () => {
       throw new Error('getaddrinfo ENOTFOUND')
     }
     expect(await sitemapSlugs(failing, 'example.com', noLog)).toEqual([])
+  })
+})
+
+describe('realFetchText', () => {
+  async function serve(handler: http.RequestListener) {
+    const hits: string[] = []
+    const server = http.createServer((req, res) => (hits.push(req.url ?? ''), handler(req, res)))
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    return { hits, port, close: () => new Promise((resolve) => server.close(resolve)) }
+  }
+
+  test('follows a redirect on the same host', async () => {
+    const s = await serve((req, res) => (req.url === '/old' ? res.writeHead(301, { location: '/new' }).end() : res.end('ok')))
+    expect(await realFetchText(`http://127.0.0.1:${s.port}/old`)).toEqual({ status: 200, text: 'ok' })
+    await s.close()
+  })
+
+  test('refuses a redirect to another host without requesting it', async () => {
+    const s = await serve((req, res) =>
+      req.url === '/away' ? res.writeHead(302, { location: `http://localhost:${s.port}/inside` }).end() : res.end('secret'),
+    )
+    await expect(realFetchText(`http://127.0.0.1:${s.port}/away`)).rejects.toThrow('redirected off the site')
+    expect(s.hits).toEqual(['/away'])
+    await s.close()
+  })
+
+  test('refuses a response over the size cap', async () => {
+    const s = await serve((_req, res) => res.end(Buffer.alloc(MAX_FETCH_BYTES + 1, 'a')))
+    await expect(realFetchText(`http://127.0.0.1:${s.port}/big`)).rejects.toThrow('larger than')
+    await s.close()
   })
 })
 

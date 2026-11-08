@@ -2,9 +2,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { runAll, type SiteOutcome } from '../src/pipeline.js'
+import { REVIEWER_TOOLS, WRITER_TOOLS } from '../src/claude.js'
 import { FAILURES_FILE, LOCK_FILE, readFailures } from '../src/runState.js'
-import { guideFor, makeEnv, NOW, site } from './pipelineEnv.js'
+import { guideFor, makeEnv, NOW, result, site } from './pipelineEnv.js'
 
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null']
 const clonePathOf = (outcome: SiteOutcome) => ('clonePath' in outcome ? outcome.clonePath : undefined)
 
 describe('runAll', () => {
@@ -18,7 +20,7 @@ describe('runAll', () => {
     expect(prCreate.args).toContain('seo-guide/how-to-finish-a-song')
     expect(prCreate.args).toContain('Add guide: How to Finish a Song')
     expect(prCreate.opts?.input).toContain('<!-- seo-driver keyword: how to finish a song -->')
-    expect(env.callsTo('git', 'push')).toBe(1)
+    expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(1)
     expect(fs.readdirSync(env.config.workDir)).toEqual([])
   })
 
@@ -108,7 +110,7 @@ describe('runAll', () => {
         const clone = clonePathOf(outcomes[0])
         expect(clone && fs.existsSync(clone)).toBe(true)
         expect(env.callsTo('gh', 'pr', 'create')).toBe(0)
-        expect(env.callsTo('git', 'push')).toBe(0)
+        expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(0)
       })
     }
   })
@@ -152,14 +154,85 @@ describe('runAll', () => {
     expect(exitCode).toBe(1)
     expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package.json, .github/workflows/x.yml')
     expect(env.callsTo('npm')).toBe(0)
-    expect(env.callsTo('git', 'push')).toBe(0)
+    expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(0)
   })
 
-  test('fails the site when the build breaks', async () => {
+  test('fails the site when the build still breaks after two fixes', async () => {
     const env = makeEnv({ handlers: [{ match: (cmd) => cmd === 'npm', result: { code: 1, stderr: 'vite: missing input' } }] })
     const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes[0].status).toBe('failed')
     expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('build failed')
+    expect(env.claudeRuns).toEqual(['writer', 'fixer', 'fixer'])
+  })
+
+  test('sends a failing build back to the fixer, then reviews and opens the PR', async () => {
+    let builds = 0
+    const env = makeEnv({
+      handlers: [{ match: (cmd) => cmd === 'npm', result: () => (builds++ === 0 ? { code: 1, stderr: 'vite: missing input' } : { stdout: 'built' }) }],
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status).toBe('opened')
+    expect(env.claudeRuns).toEqual(['writer', 'fixer', 'reviewer'])
+    const fixerCall = env.exec.calls.filter((c) => c.cmd === 'claude' && c.args[0] === '-p')[1]
+    expect(fixerCall.opts?.input).toContain('vite: missing input')
+  })
+
+  test('gives Claude no command tools; the script runs the build itself', async () => {
+    const env = makeEnv()
+    await runAll(env.config, env.deps, { dryRun: true })
+    const toolsOf = (i: number) => {
+      const args = env.exec.calls.filter((c) => c.cmd === 'claude' && c.args[0] === '-p')[i].args
+      return args[args.indexOf('--tools') + 1]
+    }
+    expect(toolsOf(0)).toBe(WRITER_TOOLS.tools.join(','))
+    expect(toolsOf(1)).toBe(REVIEWER_TOOLS.tools.join(','))
+    expect(env.callsTo('npm', 'run', 'build')).toBe(1)
+  })
+
+  test('fails the site when the writer edits an existing page instead of adding one', async () => {
+    const env = makeEnv({ handlers: [{ match: (cmd, args) => cmd === 'git' && args[0] === 'cat-file', result: { code: 0 } }] })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain(
+      'guide how-to-finish-a-song/index.html is an existing page',
+    )
+    const check = env.exec.calls.find((c) => c.cmd === 'git' && c.args[0] === 'cat-file')
+    expect(check?.args).toEqual(['cat-file', '-e', 'HEAD:how-to-finish-a-song/index.html'])
+    expect(env.claudeRuns).toEqual(['writer'])
+  })
+
+  test('names the branch by date when neither slug nor keyword has Latin letters', async () => {
+    const keyword = 'как закончить песню'
+    const env = makeEnv({
+      handlers: [
+        {
+          match: (cmd, args) => cmd === 'gum' && args[1] === 'googleads.keywordPlanIdeas.generateKeywordIdeas',
+          result: { stdout: JSON.stringify({ results: [{ text: keyword, keywordIdeaMetrics: { avgMonthlySearches: '900', competition: 'LOW' } }] }) },
+        },
+      ],
+      writer: (cwd) => {
+        fs.mkdirSync(path.join(cwd, 'how-to-finish-a-song'), { recursive: true })
+        fs.writeFileSync(path.join(cwd, 'how-to-finish-a-song', 'index.html'), '<h2>Sources</h2>')
+        return result({ ...guideFor(keyword), slug: 'как-закончить-песню' })
+      },
+    })
+    const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(outcomes[0].status).toBe('opened')
+    const prCreate = env.exec.calls.find((c) => c.cmd === 'gh' && c.args[0] === 'pr' && c.args[1] === 'create')!
+    expect(prCreate.args).toContain('seo-guide/guide-2026-10-24')
+  })
+
+  test('refreshes the lock before each site, so a long run keeps it', async () => {
+    let lockDuringWrite: { refreshedAt?: string } = {}
+    const env = makeEnv({
+      writer: (cwd) => {
+        lockDuringWrite = JSON.parse(fs.readFileSync(path.join(env.config.workDir, LOCK_FILE), 'utf8'))
+        fs.mkdirSync(path.join(cwd, 'how-to-finish-a-song'), { recursive: true })
+        fs.writeFileSync(path.join(cwd, 'how-to-finish-a-song', 'index.html'), '<h2>Sources</h2>')
+        return result(guideFor('how to finish a song'))
+      },
+    })
+    await runAll(env.config, env.deps, { dryRun: true })
+    expect(lockDuringWrite.refreshedAt).toBe(NOW.toISOString())
   })
 
   test('fails the site when the guide has no Sources section', async () => {
@@ -180,7 +253,7 @@ describe('runAll', () => {
     expect(outcomes[0].status).toBe('dry-run')
     expect(fs.existsSync(clonePathOf(outcomes[0])!)).toBe(true)
     expect(exitCode).toBe(0)
-    expect(env.callsTo('git', 'push')).toBe(0)
+    expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(0)
     expect(env.callsTo('gh', 'pr', 'create')).toBe(0)
   })
 
@@ -296,7 +369,7 @@ describe('runAll', () => {
     expect(outcomes).toEqual([
       { domain: 'mixingpal.com', status: 'skipped', reason: 'guide PR #9 opened while this run was writing' },
     ])
-    expect(env.callsTo('git', 'push')).toBe(0)
+    expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(0)
     expect(fs.readdirSync(env.config.workDir)).toEqual([])
   })
 
@@ -306,10 +379,11 @@ describe('runAll', () => {
     })
     const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('HTTP 502')
-    const order = env.exec.calls.map((c) => [c.cmd, ...c.args].slice(0, 3).join(' '))
-    expect(order.indexOf('gh label create')).toBeLessThan(order.indexOf('git push --no-verify'))
+    const label = env.exec.calls.findIndex((c) => c.cmd === 'gh' && c.args[0] === 'label')
+    const push = env.exec.calls.findIndex((c) => c.cmd === 'git' && c.args.includes('push'))
+    expect(label).toBeLessThan(push)
     const remove = env.exec.calls.find((c) => c.cmd === 'git' && c.args.includes('--delete'))
-    expect(remove?.args).toEqual(['push', '--no-verify', 'origin', '--delete', 'seo-guide/how-to-finish-a-song'])
+    expect(remove?.args).toEqual([...NO_HOOKS, 'push', '--no-verify', 'origin', '--delete', 'seo-guide/how-to-finish-a-song'])
   })
 
   test('fails the site when the build changes a protected file', async () => {
@@ -325,7 +399,7 @@ describe('runAll', () => {
     })
     const { outcomes } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes[0].status === 'failed' && outcomes[0].reason).toContain('package-lock.json')
-    expect(env.callsTo('git', 'push')).toBe(0)
+    expect(env.callsTo('git', ...NO_HOOKS, 'push')).toBe(0)
   })
 
   test("keeps the writer's keyword when the fixer changes it", async () => {

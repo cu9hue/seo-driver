@@ -8,6 +8,7 @@ import {
   cloneSite,
   commitAndPush,
   deleteRemoteBranch,
+  existsInBase,
   hasGuideTemplate,
   hasSourcesSection,
   protectedChanges,
@@ -95,31 +96,50 @@ describe('changedFiles', () => {
   })
 })
 
+describe('existsInBase', () => {
+  test('a real repo: tells a committed file from a new one', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-repo-'))
+    const { realExec } = await import('../src/exec.js')
+    await realExec('git', ['init', '-q'], { cwd: repo })
+    fs.mkdirSync(path.join(repo, 'old-guide'))
+    fs.writeFileSync(path.join(repo, 'old-guide', 'index.html'), 'old')
+    await realExec('git', ['add', '-A'], { cwd: repo })
+    await realExec('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base'], { cwd: repo })
+    fs.writeFileSync(path.join(repo, 'old-guide', 'index.html'), 'rewritten')
+    fs.mkdirSync(path.join(repo, 'new-guide'))
+    fs.writeFileSync(path.join(repo, 'new-guide', 'index.html'), 'new')
+    expect(await existsInBase(realExec, repo, 'old-guide/index.html')).toBe(true)
+    expect(await existsInBase(realExec, repo, 'new-guide/index.html')).toBe(false)
+  })
+})
+
 describe('deleteRemoteBranch', () => {
   test('deletes the pushed branch without running hooks', async () => {
-    const exec = fakeExec([{ match: is('git', 'push'), result: {} }])
+    const exec = fakeExec([{ match: is('git'), result: {} }])
     await deleteRemoteBranch(exec, '/clone', 'seo-guide/arrange-song')
-    expect(exec.calls[0].args).toEqual(['push', '--no-verify', 'origin', '--delete', 'seo-guide/arrange-song'])
+    expect(exec.calls[0].args).toEqual(['-c', 'core.hooksPath=/dev/null', 'push', '--no-verify', 'origin', '--delete', 'seo-guide/arrange-song'])
     expect(exec.calls[0].opts?.cwd).toBe('/clone')
   })
 })
 
 describe('commitAndPush', () => {
-  test('branches, commits everything and pushes', async () => {
+  // --no-verify skips only some hooks; post-checkout, post-commit and
+  // reference-transaction would still run from a hooks path the build set.
+  test('branches, commits everything and pushes, with no hooks', async () => {
     const exec = fakeExec([{ match: is('git'), result: {} }])
     await commitAndPush(exec, '/clone', 'seo-guide/arrange-song', 'Add guide: Arrange')
     expect(exec.calls.map((c) => c.args)).toEqual([
-      ['checkout', '-b', 'seo-guide/arrange-song'],
-      ['add', '-A'],
-      ['commit', '--no-verify', '-m', 'Add guide: Arrange'],
-      ['push', '--no-verify', '-u', 'origin', 'seo-guide/arrange-song'],
+      ['-c', 'core.hooksPath=/dev/null', 'checkout', '-b', 'seo-guide/arrange-song'],
+      ['-c', 'core.hooksPath=/dev/null', 'add', '-A'],
+      ['-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-m', 'Add guide: Arrange'],
+      ['-c', 'core.hooksPath=/dev/null', 'push', '--no-verify', '-u', 'origin', 'seo-guide/arrange-song'],
     ])
     expect(exec.calls.every((c) => c.opts?.cwd === '/clone')).toBe(true)
   })
 
   test('stops at the first failing git command', async () => {
     const exec = fakeExec([
-      { match: is('git', 'push'), result: { code: 1, stderr: 'permission denied' } },
+      { match: (cmd, args) => cmd === 'git' && args.includes('push'), result: { code: 1, stderr: 'permission denied' } },
       { match: is('git'), result: {} },
     ])
     await expect(commitAndPush(exec, '/clone', 'b', 'm')).rejects.toThrow('permission denied')

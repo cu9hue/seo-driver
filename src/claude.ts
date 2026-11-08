@@ -1,24 +1,32 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Exec } from './exec.js'
-import type { SiteConfig } from './types.js'
 
-const RESEARCH_TOOLS = ['Glob', 'Grep', 'WebSearch', 'WebFetch', 'Skill']
 const CLAUDE_TIMEOUT_MS = 45 * 60 * 1000
-const writingSkillDir = (home: string) => path.join(home, '.claude', 'skills', 'writing')
+export const writingSkillDir = (home: string) => path.join(home, '.claude', 'skills', 'writing')
 
-export function allowedTools(site: SiteConfig, _home: string): string[] {
-  return ['Read(./**)', 'Edit(./**)', 'Write(./**)', ...RESEARCH_TOOLS, ...site.buildCommands.map((c) => `Bash(${c})`)]
+export interface ToolSet {
+  // The only tools Claude has. No command tools: the script runs the build.
+  tools: string[]
+  // What Claude may use without asking. Glob and Grep need no rule inside
+  // the clone; a bare rule would let them search the whole machine.
+  allow: string[]
 }
 
-export function reviewerTools(_site: SiteConfig, _home: string): string[] {
-  return ['Read(./**)', ...RESEARCH_TOOLS]
+export const WRITER_TOOLS: ToolSet = {
+  tools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+  allow: ['Read(./**)', 'Edit(./**)', 'WebSearch', 'WebFetch'],
 }
 
-// Deny rules win over any allow rule in the user's own settings. Edits under
-// .git could plant hooks or config that the script's own git calls would run.
+export const REVIEWER_TOOLS: ToolSet = {
+  tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+  allow: ['Read(./**)', 'WebSearch', 'WebFetch'],
+}
+
+// Edits under .git could plant hooks or config that the script's own git
+// calls would run. Edit rules cover every file-writing tool.
 export function deniedTools(): string[] {
-  return ['Bash(git *)', 'Bash(gh *)', 'Bash(gum *)', 'Edit(./.git/**)', 'Write(./.git/**)']
+  return ['Edit(./.git/**)']
 }
 
 export async function runClaude<T>(
@@ -26,7 +34,7 @@ export async function runClaude<T>(
   opts: {
     cwd: string
     prompt: string
-    tools: string[]
+    tools: ToolSet
     schema: object
     home: string
     maxBudgetUsd: number
@@ -40,18 +48,20 @@ export async function runClaude<T>(
       '-p',
       '--output-format', 'json',
       '--json-schema', JSON.stringify(opts.schema),
-      // Overrides a defaultMode (auto, bypass) from the user's settings.
+      // Search text and fetched pages can carry injected instructions, so
+      // Claude runs restricted: no settings files (yours or the repo's), no
+      // command tools, and file tools confined to the clone and --add-dir.
+      '--restricted',
+      '--strict-mcp-config',
+      '--tools', opts.tools.tools.join(','),
       '--permission-mode', 'manual',
       '--max-budget-usd', String(opts.maxBudgetUsd),
-      // Ignore .claude/ settings inside the cloned site repo.
-      '--setting-sources', 'user',
-      // User hooks can rewrite commands (so they stop matching the allowlist)
-      // or approve them, so none run here.
+      // Belt and braces: no hook from any remaining source runs either.
       '--settings', JSON.stringify({ disableAllHooks: true }),
-      // Lets Claude read the writing skill's reference files; edits there are
-      // still outside the Edit(./**) allowlist.
+      // Restricted mode loads no user skills, so the prompts point Claude at
+      // the writing skill's files, which it may read but not edit.
       '--add-dir', writingSkillDir(opts.home),
-      '--allowedTools', opts.tools.join(','),
+      '--allowedTools', opts.tools.allow.join(','),
       '--disallowedTools', deniedTools().join(','),
     ],
     { cwd: opts.cwd, input: opts.prompt, timeoutMs: CLAUDE_TIMEOUT_MS },

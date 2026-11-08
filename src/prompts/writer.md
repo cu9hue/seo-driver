@@ -20,7 +20,7 @@ The site already covers these topics. Do not repeat them:
 - Put the answer first. Readers should get it in the opening lines.
 - Be concrete and specific to this product's domain: real menu names, real setting names, real numbers.
 - Research with WebSearch and WebFetch. Back every factual claim with a source. Prefer primary sources: official manuals, vendor documentation, standards. Cut any claim you cannot source.
-- Write the prose with the `writing` skill. Load it with the Skill tool before you write.
+- Write the prose with the writing skill. Before you write, read `{{writingSkill}}/SKILL.md` and the reference files it points to in that folder.
 - Match the structure, voice, and closing pitch of the existing guide `{{exampleGuide}}`. Mention the product lightly and keep the closing call to action. No sales copy in the middle of the guide.
 - End the guide with a section headed "Sources" that lists every source you cited.
 
@@ -32,8 +32,6 @@ Site-specific instructions (may be empty):
 
 {{instructions}}
 
-When you are done, check the site still builds by running: {{buildCommands}}. Fix anything you broke.
-
-Do not run git, gh, or any command other than the build commands. Do not commit.
+You cannot run commands. When you finish, the site is built with {{buildCommands}}, and any build errors come back to you to fix.
 
 Return the result as the structured output: the keyword, title, slug, the guide's repo-relative path, every source URL, the files that now link to the guide, and your reason.

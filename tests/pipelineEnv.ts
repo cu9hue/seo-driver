@@ -130,6 +130,8 @@ export function makeEnv(options: EnvOptions = {}): Env {
       },
     },
     { match: is('git', 'status'), result: { stdout: ' M index.html\0?? how-to-finish-a-song/index.html\0' } },
+    // The guide is a new file, absent from the base commit.
+    { match: is('git', 'cat-file'), result: { code: 1 } },
     { match: is('npm'), result: { stdout: 'built' } },
     { match: is('git'), result: {} },
     { match: is('gh', 'label', 'create'), result: {} },

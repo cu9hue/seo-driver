@@ -1,47 +1,31 @@
 import { describe, expect, test } from 'vitest'
-import { allowedTools, deniedTools, renderPrompt, reviewerTools, runClaude } from '../src/claude.js'
-import type { SiteConfig } from '../src/types.js'
+import { deniedTools, renderPrompt, REVIEWER_TOOLS, runClaude, WRITER_TOOLS } from '../src/claude.js'
 import { fakeExec, is } from './fakeExec.js'
 
-const site: SiteConfig = {
-  domain: 'mixingpal.com',
-  repo: 'antithetical-labs/mixing-pal-landing',
-  baseBranch: 'main',
-  intervalDays: 2,
-  seedKeywords: [],
-  buildCommands: ['npm ci', 'npm run build'],
-  exampleGuide: 'how-to-arrange-a-song/index.html',
-}
-
-describe('allowedTools', () => {
-  test('allows file edits in the clone, research, the writing skill and the build', () => {
-    const tools = allowedTools(site, '/home/u')
-    expect(tools).toContain('Edit(./**)')
-    expect(tools).toContain('WebFetch')
-    expect(tools).toContain('Bash(npm ci)')
-    expect(tools).toContain('Bash(npm run build)')
-    expect(tools.some((t) => /^Bash\((git|gh|gum)\b/.test(t))).toBe(false)
+describe('tool sets', () => {
+  test('the writer can read, edit and research, but has no command tools', () => {
+    expect(WRITER_TOOLS.tools).toEqual(['Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebSearch', 'WebFetch'])
+    expect(WRITER_TOOLS.allow).toContain('Edit(./**)')
   })
 
-  test('reviewer tools cannot edit or run commands', () => {
-    const tools = reviewerTools(site, '/home/u')
-    expect(tools).toContain('Read(./**)')
-    expect(tools).toContain('WebFetch')
-    expect(tools.some((t) => t.startsWith('Edit') || t.startsWith('Write') || t.startsWith('Bash'))).toBe(false)
+  test('the reviewer cannot edit', () => {
+    expect(REVIEWER_TOOLS.tools).toEqual(['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'])
+    expect(REVIEWER_TOOLS.allow.some((t) => t.startsWith('Edit'))).toBe(false)
   })
 
-  test('denies git, gh and gum outright', () => {
-    expect(deniedTools()).toEqual(expect.arrayContaining(['Bash(git *)', 'Bash(gh *)', 'Bash(gum *)']))
+  test('no allow rule reaches outside the clone', () => {
+    // A bare Glob or Grep rule lets Claude search any file on the machine.
+    for (const allow of [...WRITER_TOOLS.allow, ...REVIEWER_TOOLS.allow]) expect(['Glob', 'Grep']).not.toContain(allow)
   })
 
   test('denies edits inside .git, where hooks and config would run as the user', () => {
-    expect(deniedTools()).toEqual(expect.arrayContaining(['Edit(./.git/**)', 'Write(./.git/**)']))
+    expect(deniedTools()).toEqual(['Edit(./.git/**)'])
   })
 })
 
 describe('runClaude', () => {
   const schema = { type: 'object' }
-  const base = { cwd: '/c', prompt: 'p', tools: [], schema, home: '/h', maxBudgetUsd: 7.5, label: 'writer', log: () => {} }
+  const base = { cwd: '/c', prompt: 'p', tools: REVIEWER_TOOLS, schema, home: '/h', maxBudgetUsd: 7.5, label: 'writer', log: () => {} }
 
   test('runs headless with the allowlist and returns structured_output', async () => {
     const exec = fakeExec([
@@ -54,7 +38,7 @@ describe('runClaude', () => {
       ...base,
       cwd: '/clone',
       prompt: 'review it',
-      tools: ['Read(./**)', 'WebFetch'],
+      tools: REVIEWER_TOOLS,
       home: '/home/u',
     })
     expect(result).toEqual({ pass: true, issues: [] })
@@ -65,8 +49,12 @@ describe('runClaude', () => {
     expect(args[args.indexOf('--json-schema') + 1]).toBe('{"type":"object"}')
     expect(args[args.indexOf('--permission-mode') + 1]).toBe('manual')
     expect(args[args.indexOf('--max-budget-usd') + 1]).toBe('7.5')
-    expect(args[args.indexOf('--setting-sources') + 1]).toBe('user')
-    expect(args[args.indexOf('--allowedTools') + 1]).toBe('Read(./**),WebFetch')
+    // --restricted ignores settings files, drops command tools, and confines
+    // file tools to the clone and --add-dir.
+    expect(args).toContain('--restricted')
+    expect(args).toContain('--strict-mcp-config')
+    expect(args[args.indexOf('--tools') + 1]).toBe(REVIEWER_TOOLS.tools.join(','))
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe(REVIEWER_TOOLS.allow.join(','))
     expect(args[args.indexOf('--disallowedTools') + 1]).toBe(deniedTools().join(','))
     expect(args).not.toContain('--dangerously-skip-permissions')
     // User hooks (e.g. a command-rewriting PreToolUse hook) must not run or
@@ -113,7 +101,8 @@ describe('renderPrompt', () => {
     covered: '- how-to-arrange-a-song',
     exampleGuide: 'how-to-arrange-a-song/index.html',
     instructions: '',
-    buildCommands: 'npm ci, npm run build',
+    buildCommands: 'npm ci, then npm run build',
+    writingSkill: '/home/u/.claude/skills/writing',
   }
 
   test('fills every placeholder in the writer prompt', () => {
@@ -121,6 +110,7 @@ describe('renderPrompt', () => {
     expect(prompt).not.toContain('{{')
     expect(prompt).toContain('mixingpal.com')
     expect(prompt).toContain('how-to-arrange-a-song/index.html')
+    expect(prompt).toContain('/home/u/.claude/skills/writing/SKILL.md')
   })
 
   test('does not expand placeholders inside values', () => {
@@ -134,7 +124,8 @@ describe('renderPrompt', () => {
   })
 
   test('fills the reviewer and fixer prompts', () => {
-    expect(renderPrompt('reviewer', { guidePath: 'g/index.html', keyword: 'k', covered: '-' })).not.toContain('{{')
-    expect(renderPrompt('fixer', { guidePath: 'g/index.html', issues: '[]', buildCommands: 'npm run build' })).not.toContain('{{')
+    const writingSkill = '/home/u/.claude/skills/writing'
+    expect(renderPrompt('reviewer', { guidePath: 'g/index.html', keyword: 'k', covered: '-', writingSkill })).not.toContain('{{')
+    expect(renderPrompt('fixer', { guidePath: 'g/index.html', issues: '[]', buildCommands: 'npm run build', writingSkill })).not.toContain('{{')
   })
 })

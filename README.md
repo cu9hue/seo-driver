@@ -23,7 +23,7 @@ On the machine that runs it (macOS or Ubuntu, amd64 or arm64):
 - [gum](https://github.com/ehmo/gum/releases) v2.3.1 or later: `curl -fsSL https://raw.githubusercontent.com/ehmo/gum/main/install.sh | bash`.
 - [`gh`](https://cli.github.com/), logged in with push access to every site repo: `gh auth login`, then `gh auth setup-git` so `git push` uses the same login. On a headless box this step is easy to miss, and the push fails only after every Claude run.
 - `git`, with `user.name` and `user.email` set.
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in.
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in, recent enough to have `--restricted` (2.1.319 has it).
 - Your `writing` skill at `~/.claude/skills/writing`.
 
 Then, in this folder:
@@ -66,7 +66,7 @@ npm run build
 
 gum keeps OAuth logins and the developer token in the OS keyring. Search Console and Google Ads only work with your own OAuth login, so a service account is no way around this. Under cron the keyring is usually locked or missing, and gum fails with `AUTH_KEYCHAIN_UNAVAILABLE`.
 
-The fix is to start an unlocked keyring for each run. Install `gnome-keyring` and `libsecret-1-0`, keep the keyring password in a file only you can read, and do both the `gum login` steps and the runs inside that session:
+The fix is to start an unlocked keyring for each run. Install `gnome-keyring` and `libsecret-1-0`, keep the keyring password in a file only you can read (`chmod 600 ~/.config/seo-driver/keyring-pass`), and do both the `gum login` steps and the runs inside that session:
 
 ```bash
 dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock --components=secrets < ~/.config/seo-driver/keyring-pass >/dev/null; node dist/cli.js run'
@@ -86,7 +86,7 @@ Each site entry:
 | --- | --- | --- |
 | `domain` | yes | `mixingpal.com` |
 | `repo` | yes | GitHub `owner/name` |
-| `buildCommands` | yes | Commands that build the site, one per entry, e.g. `["npm ci", "npm run build"]`. They run without a shell, so `&&`, pipes, quotes, `*` and `VAR=value` are rejected. These are the only commands Claude is allowed to run. |
+| `buildCommands` | yes | Commands that build the site, one per entry, e.g. `["npm ci", "npm run build"]`. They run without a shell, so `&&`, pipes, quotes, `*` and `VAR=value` are rejected. The script runs them after each Claude edit; Claude never runs them. |
 | `exampleGuide` or `instructionsFile` | one of them | Repo path of an existing guide for Claude to copy, or of a file explaining how to add one. A site with neither is skipped. |
 | `searchConsoleProperty` | no | `sc-domain:mixingpal.com` for a domain property, `https://mixingpal.com/` for a URL-prefix property. |
 | `seedKeywords` | no | Up to 20 Keyword Planner seeds. The site URL is always a seed. |
@@ -120,9 +120,9 @@ node dist/cli.js run
 The command prints timestamped lines: progress, each Claude session's id and cost (resume one with `claude -r <id>` to see what it did), then one line per site: `opened <url>`, `skipped (<reason>)`, `dry-run`, or `failed (<reason>)`. The exit code is `1` when any site failed, Keyword Planner failed, or another run was still going, otherwise `0`.
 
 - A failed site keeps its clone so you can look at it, until that site's next run replaces it.
-- A failed site waits `intervalDays` before its next try. To retry sooner, delete its line from `workDir/failures.json`. A failed dry run records nothing.
+- A site that fails after cloning waits `intervalDays` before its next try, since a retry would repeat the Claude runs. To retry sooner, delete its line from `workDir/failures.json`. A failed dry run records nothing. A failure before cloning (GitHub, Search Console, Keyword Planner) costs nothing and is retried on the next run.
 - A Search Console failure fails only its site. A Keyword Planner failure stops the whole run, since it is almost always a credential problem.
-- Only one run works at a time. A second run exits at once while the first holds `workDir/seo-driver.lock`. A lock left by a crash is taken over once its process is gone.
+- Only one run works at a time. A second run exits at once while the first holds `workDir/seo-driver.lock`. The run refreshes the lock before each site. A lock left by a crash is taken over once its process is gone, or 12 hours after its last refresh. If a run says another run is taking over the stale lock and none is, delete the `seo-driver.lock*` files in `workDir`.
 - Every command has a time limit: 45 minutes for each Claude run, 15 for each build command, 10 for the rest.
 
 Scheduling is yours. For example, a daily cron entry:
@@ -133,17 +133,18 @@ Scheduling is yours. For example, a daily cron entry:
 
 ## What Claude can do
 
-The script makes every gum, `git push`, and `gh` call itself. Claude runs headless with:
+The script makes every gum, `git`, `gh`, and build call itself. Search text and the pages Claude reads can carry instructions planted by anyone, so Claude runs headless with:
 
-- `--permission-mode manual`, which overrides a `defaultMode` in your settings;
-- the `claudeMaxBudgetUsd` spend cap;
-- only your user settings, so `.claude/` settings inside a site repo are ignored;
-- your hooks turned off, so a hook can't rewrite or approve its commands;
-- this allowlist: read and edit files inside the clone, read the `writing` skill, search and fetch the web, and run the site's `buildCommands`.
+- `--restricted`: no settings files (yours or the site repo's), no MCP servers, no shell or other command tools, and file tools confined to the clone and the `writing` skill folder;
+- these tools only: read, edit, and search files, plus web search and fetch. The reviewer cannot edit;
+- `--permission-mode manual`, the `claudeMaxBudgetUsd` spend cap, and hooks turned off.
 
-`git`, `gh`, `gum`, and edits under `.git/` are denied outright. The reviewer can only read and research. A site fails, with no push, when Claude or the final build changes anything under `.github/`, a `package.json`, a lockfile, or `.npmrc`. The script's own commit and push skip git hooks.
+Edits under `.git/` are denied. After each Claude session, and before each build, the script checks the changed files. A site fails, with no push, when Claude or the build changes anything under `.github/`, a `package.json`, a lockfile, or `.npmrc`, or when the guide overwrites an existing page. The script's own git calls run with no hooks.
 
-**What this does not stop.** Claude has to edit the site's code (for Mixing Pal, `vite.config.ts`), and the build commands run that code as you, with your GitHub login on the machine. A web page Claude reads could try to trick it into planting code that runs during the build. The guards above close the obvious paths, not this one. To close it, run seo-driver as a separate user or in a container that holds only a GitHub token scoped to the site repos.
+**What this does not stop.**
+
+- Claude has to edit the site's code (for Mixing Pal, `vite.config.ts`), and the build runs that code as you, with your GitHub login on the machine. A web page Claude reads could try to trick it into planting code that runs during the build. To close this, run seo-driver as a separate user or in a container that holds only a GitHub token scoped to the site repos.
+- The pushed branch runs in CI before you review it. Workflows triggered by pull requests, and preview deploys (Vercel, Netlify), build the same Claude-edited code with their own secrets. If you turn those on, require approval before they run on PRs from this tool, or keep secrets out of PR builds.
 
 ## Develop
 

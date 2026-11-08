@@ -3,9 +3,15 @@ import path from 'node:path'
 import type { Exec } from './exec.js'
 import type { SiteConfig } from './types.js'
 
+// Hooks in the clone are repo code, and these calls run with the user's
+// credentials. --no-verify alone skips only some hooks, and the build may
+// have pointed core.hooksPath at a repo folder (husky does).
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null']
+
 async function run(exec: Exec, cwd: string, cmd: string, args: string[]): Promise<string> {
   const result = await exec(cmd, args, { cwd })
-  if (result.code !== 0) throw new Error(`${cmd} ${args[0]} failed: ${(result.stderr || result.stdout).trim()}`)
+  const subcommand = args.find((a) => !NO_HOOKS.includes(a))
+  if (result.code !== 0) throw new Error(`${cmd} ${subcommand} failed: ${(result.stderr || result.stdout).trim()}`)
   return result.stdout
 }
 
@@ -53,16 +59,20 @@ export async function changedFiles(exec: Exec, clonePath: string): Promise<strin
 }
 
 export async function commitAndPush(exec: Exec, clonePath: string, branch: string, message: string): Promise<void> {
-  await run(exec, clonePath, 'git', ['checkout', '-b', branch])
-  await run(exec, clonePath, 'git', ['add', '-A'])
-  // --no-verify: hooks in the clone are repo code, and these calls run with
-  // the user's credentials.
-  await run(exec, clonePath, 'git', ['commit', '--no-verify', '-m', message])
-  await run(exec, clonePath, 'git', ['push', '--no-verify', '-u', 'origin', branch])
+  await run(exec, clonePath, 'git', [...NO_HOOKS, 'checkout', '-b', branch])
+  await run(exec, clonePath, 'git', [...NO_HOOKS, 'add', '-A'])
+  await run(exec, clonePath, 'git', [...NO_HOOKS, 'commit', '--no-verify', '-m', message])
+  await run(exec, clonePath, 'git', [...NO_HOOKS, 'push', '--no-verify', '-u', 'origin', branch])
 }
 
 export async function deleteRemoteBranch(exec: Exec, clonePath: string, branch: string): Promise<void> {
-  await run(exec, clonePath, 'git', ['push', '--no-verify', 'origin', '--delete', branch])
+  await run(exec, clonePath, 'git', [...NO_HOOKS, 'push', '--no-verify', 'origin', '--delete', branch])
+}
+
+// Whether the clone's base commit already has this repo-relative file.
+export async function existsInBase(exec: Exec, clonePath: string, file: string): Promise<boolean> {
+  const result = await exec('git', ['cat-file', '-e', `HEAD:${file}`], { cwd: clonePath })
+  return result.code === 0
 }
 
 const PROTECTED_DIRS = ['.github/']
@@ -78,8 +88,7 @@ export function protectedChanges(files: string[]): string[] {
   )
 }
 
-// Commands are split on spaces and run without a shell, matching the
-// Bash(<command>) entries Claude is allowed to run.
+// Commands are split on spaces and run without a shell.
 export async function runBuild(exec: Exec, clonePath: string, site: SiteConfig): Promise<{ ok: boolean; output: string }> {
   let output = ''
   for (const command of site.buildCommands) {

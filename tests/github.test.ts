@@ -143,6 +143,13 @@ describe('renderPrBody', () => {
     expect(body).toContain('No issues found.')
   })
 
+  test('shows search text as inert code, since anyone can make a query appear', () => {
+    const hostile = { ...runnerUp, keyword: 'ping @octocat `x` [win](https://evil.test)' }
+    const body = renderPrBody({ site, guide, chosen, shortlist: [chosen, hostile], fixed: [] })
+    expect(body).toContain('`how to arrange a song`')
+    expect(body).toContain('- `ping @octocat x [win](https://evil.test)` (Keyword Planner')
+  })
+
   test('lists fixed review issues', () => {
     const body = renderPrBody({
       site,

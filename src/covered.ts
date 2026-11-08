@@ -4,10 +4,42 @@ import path from 'node:path'
 export type FetchText = (url: string) => Promise<{ status: number; text: string }>
 
 const FETCH_TIMEOUT_MS = 30 * 1000
+const MAX_REDIRECTS = 5
+// A sitemap file may hold 50,000 URLs, about 10 MB.
+export const MAX_FETCH_BYTES = 12 * 1024 * 1024
+const MAX_CHILD_SITEMAPS = 50
 
+// The same site, ignoring a leading www.
+const sameSite = (url: URL, host: string) => url.hostname.replace(/^www\./, '') === host.replace(/^www\./, '')
+
+async function readCapped(response: Response): Promise<string> {
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of response.body ?? []) {
+    size += chunk.byteLength
+    if (size > MAX_FETCH_BYTES) throw new Error(`response larger than ${MAX_FETCH_BYTES} bytes`)
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+// Redirects are followed by hand, so a compromised site cannot point a fetch
+// at another host, such as a machine on the local network.
 export const realFetchText: FetchText = async (url) => {
-  const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
-  return { status: response.status, text: await response.text() }
+  const start = new URL(url)
+  let current = start
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const response = await fetch(current, { redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    const location = response.headers.get('location')
+    if (response.status >= 300 && response.status < 400 && location) {
+      await response.body?.cancel()
+      current = new URL(location, current)
+      if (!sameSite(current, start.hostname)) throw new Error(`redirected off the site to ${current.host}`)
+      continue
+    }
+    return { status: response.status, text: await readCapped(response) }
+  }
+  throw new Error(`more than ${MAX_REDIRECTS} redirects`)
 }
 
 const locs = (xml: string) => [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/g)].map((m) => m[1])
@@ -36,29 +68,49 @@ function slug(url: string): string | undefined {
   return segments.pop()?.replace(/\.[a-z0-9]+$/i, '')
 }
 
-// Sitemaps named in robots.txt, else the two common default paths.
-async function sitemapUrls(fetchText: FetchText, domain: string, log: (line: string) => void): Promise<string[]> {
+// Sitemap URLs on this site only, capped in number.
+function onSite(urls: string[], domain: string): string[] {
+  return urls
+    .filter((u) => {
+      try {
+        return sameSite(new URL(u), domain)
+      } catch {
+        return false
+      }
+    })
+    .slice(0, MAX_CHILD_SITEMAPS)
+}
+
+// Every sitemap named in robots.txt, else the first of the two common
+// default paths that answers.
+async function sitemapUrls(fetchText: FetchText, domain: string, log: (line: string) => void): Promise<{ urls: string[]; all: boolean }> {
   const robots = await fetchOk(fetchText, `https://${domain}/robots.txt`, log)
-  const named = [...(robots ?? '').matchAll(/^\s*sitemap:\s*(\S+)/gim)].map((m) => m[1])
-  return named.length > 0 ? named : [`https://${domain}/sitemap.xml`, `https://${domain}/sitemap-index.xml`]
+  const named = onSite([...(robots ?? '').matchAll(/^\s*sitemap:\s*(\S+)/gim)].map((m) => m[1]), domain)
+  if (named.length > 0) return { urls: named, all: true }
+  return { urls: [`https://${domain}/sitemap.xml`, `https://${domain}/sitemap-index.xml`], all: false }
 }
 
 export async function sitemapSlugs(fetchText: FetchText, domain: string, log: (line: string) => void): Promise<string[]> {
   const tried = await sitemapUrls(fetchText, domain, log)
-  let root: string | undefined
-  for (const url of tried) {
-    root = await fetchOk(fetchText, url, log)
-    if (root) break
+  const roots: string[] = []
+  for (const url of tried.urls) {
+    const xml = await fetchOk(fetchText, url, log)
+    if (!xml) continue
+    roots.push(xml)
+    if (!tried.all) break
   }
-  if (!root) {
-    log(`${domain}: no sitemap found (tried robots.txt, ${tried.join(', ')})`)
+  if (roots.length === 0) {
+    log(`${domain}: no sitemap found (tried robots.txt, ${tried.urls.join(', ')})`)
     return []
   }
 
-  let pageUrls = locs(root)
-  if (isIndex(root)) {
-    pageUrls = []
-    for (const child of locs(root)) {
+  const pageUrls: string[] = []
+  for (const root of roots) {
+    if (!isIndex(root)) {
+      pageUrls.push(...locs(root))
+      continue
+    }
+    for (const child of onSite(locs(root), domain)) {
       const xml = await fetchOk(fetchText, child, log)
       // Follow one level only: a nested index is skipped.
       if (xml && !isIndex(xml)) pageUrls.push(...locs(xml))

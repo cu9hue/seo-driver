@@ -36,35 +36,28 @@ describe('runAll', () => {
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes).toEqual([{ domain: 'mixingpal.com', status: 'skipped', reason: 'guide PR #12 is still open' }])
     expect(exitCode).toBe(0)
-    expect(env.callsTo('gum', 'read')).toBe(0)
+    expect(env.googleCalls.length).toBe(0)
   })
 
   test('aborts the run when Keyword Planner fails', async () => {
     const env = makeEnv({
       sites: [site('mixingpal.com'), site('other.com')],
-      handlers: [
-        {
-          match: (cmd, args) => cmd === 'gum' && args[1] === 'googleads.keywordPlanIdeas.generateKeywordIdeas',
-          result: { code: 1, stderr: '{"error_code":"PERMISSION_DENIED","message":"developer token not approved"}' },
-        },
-      ],
+      google: (url) =>
+        url.includes(':generateKeywordIdeas')
+          ? { status: 403, body: { error: { status: 'PERMISSION_DENIED', message: 'The caller does not have permission' } } }
+          : undefined,
     })
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(exitCode).toBe(1)
     expect(outcomes.map((o) => o.status)).toEqual(['failed', 'failed'])
     expect(env.callsTo('gh', 'repo', 'clone')).toBe(0)
     expect(env.callsTo('gh', 'pr', 'create')).toBe(0)
-    expect(env.logs.join('\n')).toContain('googleads.keywordPlanIdeas.generateKeywordIdeas failed: PERMISSION_DENIED developer token not approved')
+    expect(env.logs.join('\n')).toContain('Keyword Planner failed: PERMISSION_DENIED: The caller does not have permission')
   })
 
   test('skips a site with no candidates', async () => {
     const env = makeEnv({
-      handlers: [
-        {
-          match: (cmd, args) => cmd === 'gum' && args[1] === 'googleads.keywordPlanIdeas.generateKeywordIdeas',
-          result: { stdout: '{}' },
-        },
-      ],
+      google: (url) => (url.includes(':generateKeywordIdeas') ? { status: 200, body: {} } : undefined),
     })
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes).toEqual([{ domain: 'mixingpal.com', status: 'skipped', reason: 'no candidates' }])
@@ -203,12 +196,10 @@ describe('runAll', () => {
   test('names the branch by date when neither slug nor keyword has Latin letters', async () => {
     const keyword = 'как закончить песню'
     const env = makeEnv({
-      handlers: [
-        {
-          match: (cmd, args) => cmd === 'gum' && args[1] === 'googleads.keywordPlanIdeas.generateKeywordIdeas',
-          result: { stdout: JSON.stringify({ results: [{ text: keyword, keywordIdeaMetrics: { avgMonthlySearches: '900', competition: 'LOW' } }] }) },
-        },
-      ],
+      google: (url) =>
+        url.includes(':generateKeywordIdeas')
+          ? { status: 200, body: { results: [{ text: keyword, keywordIdeaMetrics: { avgMonthlySearches: '900', competition: 'LOW' } }] } }
+          : undefined,
       writer: (cwd) => {
         fs.mkdirSync(path.join(cwd, 'how-to-finish-a-song'), { recursive: true })
         fs.writeFileSync(path.join(cwd, 'how-to-finish-a-song', 'index.html'), '<h2>Sources</h2>')
@@ -283,23 +274,31 @@ describe('runAll', () => {
   })
 
   test('stops before any work when preflight fails', async () => {
-    const env = makeEnv({ handlers: [{ match: (cmd) => cmd === 'gum', result: { code: 127 } }] })
+    const env = makeEnv({ handlers: [{ match: (cmd) => cmd === 'claude', result: { code: 127 } }] })
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(exitCode).toBe(1)
     expect(outcomes).toEqual([])
-    expect(env.logs.join('\n')).toContain('`gum` is not installed')
+    expect(env.logs.join('\n')).toContain('`claude` is not installed')
+    expect(env.callsTo('gh', 'pr', 'list')).toBe(0)
+  })
+
+  test('stops before any work when there is no Google login', async () => {
+    const env = makeEnv()
+    env.config.googleCredentials = path.join(env.config.workDir, 'missing.json')
+    const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
+    expect(exitCode).toBe(1)
+    expect(outcomes).toEqual([])
+    expect(env.logs.join('\n')).toContain('run `seo-driver login`')
     expect(env.callsTo('gh', 'pr', 'list')).toBe(0)
   })
 
   test('a Search Console failure fails only that site', async () => {
     const env = makeEnv({
       sites: [site('first.com'), site('second.com')],
-      handlers: [
-        {
-          match: (cmd, args) => cmd === 'gum' && args[1] === 'searchconsole.searchanalytics.query' && args[3].includes('first.com'),
-          result: { code: 1, stderr: '{"error_code":"PERMISSION_DENIED","message":"no access to property"}' },
-        },
-      ],
+      google: (url) =>
+        url.includes('/searchAnalytics/query') && url.includes('first.com')
+          ? { status: 403, body: { error: { status: 'PERMISSION_DENIED', message: 'no access to property' } } }
+          : undefined,
     })
     const { outcomes, exitCode } = await runAll(env.config, env.deps, { dryRun: false })
     expect(outcomes.map((o) => [o.domain, o.status])).toEqual([
@@ -313,8 +312,8 @@ describe('runAll', () => {
   test('filters Search Console to the configured country', async () => {
     const env = makeEnv()
     await runAll(env.config, env.deps, { dryRun: true })
-    const call = env.exec.calls.find((c) => c.cmd === 'gum' && c.args[1] === 'searchconsole.searchanalytics.query')!
-    expect(call.args[3]).toContain('"expression":"usa"')
+    const call = env.googleCalls.find((c) => c.url.includes('/searchAnalytics/query'))!
+    expect(call.body).toContain('"expression":"usa"')
   })
 
   test('exits without work while another run holds the lock', async () => {

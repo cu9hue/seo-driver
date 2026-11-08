@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
 import os from 'node:os'
+import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { loadConfig } from './config.js'
 import { realFetchText } from './covered.js'
 import { realExec } from './exec.js'
+import { realHttpPost } from './google.js'
+import { login } from './login.js'
 import { runAll, type Deps, type SiteOutcome } from './pipeline.js'
 
-const USAGE = 'usage: seo-driver run [--config <path>] [--site <domain>] [--dry-run]'
+const USAGE = [
+  'usage: seo-driver run [--config <path>] [--site <domain>] [--dry-run]',
+  '       seo-driver login --client <client_secret.json> [--out <path>]',
+].join('\n')
 
 function describe(outcome: SiteOutcome): string {
   switch (outcome.status) {
@@ -36,13 +42,30 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
         config: { type: 'string', default: 'seo-driver.config.json' },
         site: { type: 'string' },
         'dry-run': { type: 'boolean', default: false },
+        client: { type: 'string' },
+        out: { type: 'string' },
       },
     })
   } catch (err) {
     deps.log(`${(err as Error).message}\n${USAGE}`)
     return 1
   }
-  if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'run') {
+  const [command, ...rest] = parsed.positionals
+  if (command === 'login' && rest.length === 0 && parsed.values.client) {
+    try {
+      await login({
+        clientFile: parsed.values.client,
+        out: parsed.values.out ?? path.join(deps.home, '.config', 'seo-driver', 'google.json'),
+        http: deps.http,
+        log: deps.log,
+      })
+      return 0
+    } catch (err) {
+      deps.log((err as Error).message)
+      return 1
+    }
+  }
+  if (command !== 'run' || rest.length > 0) {
     deps.log(USAGE)
     return 1
   }
@@ -69,6 +92,7 @@ if (invoked) {
   const deps: Deps = {
     exec: realExec,
     fetchText: realFetchText,
+    http: realHttpPost,
     now: () => new Date(),
     home: os.homedir(),
     log: (line) => console.log(logLine(new Date(), line)),

@@ -4,10 +4,12 @@ import path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { ConfigError, loadConfig } from '../src/config.js'
 
+// Every config needs the Ads account; tests that are about it pass their own.
 function writeConfig(value: unknown): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-config-'))
   const file = path.join(dir, 'seo-driver.config.json')
-  fs.writeFileSync(file, JSON.stringify(value))
+  const withAccount = typeof value === 'object' && value !== null ? { keywordPlanner: { customerId: '123-456-7890' }, ...value } : value
+  fs.writeFileSync(file, JSON.stringify(withAccount))
   return file
 }
 
@@ -24,12 +26,38 @@ describe('loadConfig', () => {
     expect(config.workDir).toBe(path.join(os.homedir(), '.cache', 'seo-driver'))
     expect(config.keywordPlanner.geoTargetConstants).toEqual(['2840'])
     expect(config.keywordPlanner.language).toBe('1000')
-    expect(config.keywordPlanner.customerId).toBeUndefined()
+    expect(config.keywordPlanner.customerId).toBe('1234567890')
+    expect(config.keywordPlanner.loginCustomerId).toBeUndefined()
+    expect(config.googleCredentials).toBe(path.join(os.homedir(), '.config', 'seo-driver', 'google.json'))
     const site = config.sites[0]
     expect(site.baseBranch).toBe('main')
     expect(site.intervalDays).toBe(2)
     expect(site.seedKeywords).toEqual([])
     expect(site.searchConsoleProperty).toBeUndefined()
+  })
+
+  test('requires the 10-digit Google Ads account id', () => {
+    expect(() => loadConfig(writeConfig({ keywordPlanner: {}, sites: [minimalSite] }))).toThrow('keywordPlanner.customerId')
+    expect(() => loadConfig(writeConfig({ keywordPlanner: { customerId: '12345' }, sites: [minimalSite] }))).toThrow(
+      'keywordPlanner.customerId',
+    )
+  })
+
+  test('takes 1 to 10 Keyword Planner locations', () => {
+    const geo = (ids: string[]) => writeConfig({ keywordPlanner: { customerId: '1234567890', geoTargetConstants: ids }, sites: [minimalSite] })
+    expect(() => loadConfig(geo([]))).toThrow('keywordPlanner.geoTargetConstants needs 1 to 10 locations')
+    expect(() => loadConfig(geo(Array.from({ length: 11 }, (_, i) => String(2000 + i))))).toThrow('1 to 10 locations')
+    expect(loadConfig(geo(['2840', '2826'])).keywordPlanner.geoTargetConstants).toEqual(['2840', '2826'])
+  })
+
+  test('reads the manager account id, dashes removed', () => {
+    const config = loadConfig(writeConfig({ keywordPlanner: { customerId: '1234567890', loginCustomerId: '111-222-3333' }, sites: [minimalSite] }))
+    expect(config.keywordPlanner.loginCustomerId).toBe('1112223333')
+  })
+
+  test('expands ~ in googleCredentials', () => {
+    const config = loadConfig(writeConfig({ googleCredentials: '~/secrets/google.json', sites: [minimalSite] }))
+    expect(config.googleCredentials).toBe(path.join(os.homedir(), 'secrets', 'google.json'))
   })
 
   test('expands ~ in workDir', () => {

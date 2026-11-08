@@ -13,7 +13,8 @@ import {
   type GuideResult,
   type ReviewIssue,
 } from './github.js'
-import { GumError, preflight } from './gum.js'
+import { googleClient, readCredentials, type Google, type HttpPost } from './google.js'
+import { preflight } from './preflight.js'
 import { acquireLock, readFailures, recordFailure } from './runState.js'
 import { fetchKeywordIdeas } from './sources/keywordPlanner.js'
 import { fetchSearchGaps } from './sources/searchConsole.js'
@@ -39,6 +40,7 @@ const MAX_COVERED_IN_PROMPT = 300
 export interface Deps {
   exec: Exec
   fetchText: FetchText
+  http: HttpPost
   now: () => Date
   home: string
   log: (line: string) => void
@@ -83,11 +85,6 @@ function describeCovered(covered: string[]): string {
   if (covered.length > MAX_COVERED_IN_PROMPT) shown.push(`- (and ${covered.length - MAX_COVERED_IN_PROMPT} more)`)
   return shown.join('\n')
 }
-
-const describeError = (err: unknown) =>
-  err instanceof GumError
-    ? `${err.opId} failed: ${[err.errorCode, err.message].filter(Boolean).join(' ')}`
-    : (err as Error).message
 
 async function writeGuide(
   config: Config,
@@ -280,13 +277,21 @@ export async function runAll(
     return { outcomes: [], exitCode: 1 }
   }
 
+  let google: Google
+  try {
+    google = googleClient(deps.http, readCredentials(config.googleCredentials), deps.now)
+  } catch (err) {
+    log((err as Error).message)
+    return { outcomes: [], exitCode: 1 }
+  }
+
   const lock = acquireLock(config.workDir, deps.now())
   if (!lock.acquired) {
     log(`another seo-driver run (${lock.holder}) is still going; exiting`)
     return { outcomes: [], exitCode: 1 }
   }
   try {
-    const outcomes = sortLike(sites, await runLocked(config, deps, sites, opts.dryRun, lock.refresh))
+    const outcomes = sortLike(sites, await runLocked(config, deps, sites, opts.dryRun, lock.refresh, google))
     return { outcomes, exitCode: outcomes.some((o) => o.status === 'failed') ? 1 : 0 }
   } finally {
     lock.release()
@@ -299,6 +304,7 @@ async function runLocked(
   sites: SiteConfig[],
   dryRun: boolean,
   refreshLock: (now: Date) => void,
+  google: Google,
 ): Promise<SiteOutcome[]> {
   const { exec, log } = deps
   const outcomes: SiteOutcome[] = []
@@ -321,18 +327,18 @@ async function runLocked(
   const ready: DueSite[] = []
   for (const [i, due] of dueSites.entries()) {
     try {
-      due.ideas = await fetchKeywordIdeas(exec, due.site, config.keywordPlanner)
+      due.ideas = await fetchKeywordIdeas(google, due.site, config.keywordPlanner)
     } catch (err) {
-      const reason = describeError(err)
+      const reason = (err as Error).message
       log(`${due.site.domain}: ${reason}`)
       log('stopping: Keyword Planner data is required before any guide is written')
       for (const d of [...ready, ...dueSites.slice(i)]) outcomes.push({ domain: d.site.domain, status: 'failed', reason })
       return outcomes
     }
     try {
-      due.gaps = await fetchSearchGaps(exec, due.site, deps.now(), config.searchConsole.country)
+      due.gaps = await fetchSearchGaps(google, due.site, deps.now(), config.searchConsole.country)
     } catch (err) {
-      const reason = describeError(err)
+      const reason = (err as Error).message
       log(`${due.site.domain}: ${reason}`)
       outcomes.push({ domain: due.site.domain, status: 'failed', reason })
       continue

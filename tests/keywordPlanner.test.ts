@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'vitest'
-import { GumError } from '../src/gum.js'
 import { fetchKeywordIdeas } from '../src/sources/keywordPlanner.js'
 import type { Config, SiteConfig } from '../src/types.js'
-import { fakeExec, is } from './fakeExec.js'
+import { fakeGoogle } from './fakeGoogle.js'
 
 const site: SiteConfig = {
   domain: 'mixingpal.com',
@@ -13,28 +12,39 @@ const site: SiteConfig = {
   buildCommands: ['npm run build'],
   exampleGuide: 'how-to-arrange-a-song/index.html',
 }
-const kp: Config['keywordPlanner'] = { geoTargetConstants: ['2840'], language: '1000' }
+const kp: Config['keywordPlanner'] = { customerId: '1234567890', geoTargetConstants: ['2840'], language: '1000' }
 
 describe('fetchKeywordIdeas', () => {
-  test('sends url, geo and language, and omits unset fields', async () => {
-    const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: '{}' } }])
-    await fetchKeywordIdeas(exec, site, kp)
-    expect(exec.calls[0].args[1]).toBe('googleads.keywordPlanIdeas.generateKeywordIdeas')
-    // pageSize keeps each response under gum's 16 MiB cap; gum pages through the rest.
-    expect(JSON.parse(exec.calls[0].args[3])).toEqual({
-      url: 'https://mixingpal.com/',
-      geoTargetConstants: ['2840'],
-      language: '1000',
-      pageSize: 1000,
+  test('posts a URL seed with geo and language resource names to the customer', async () => {
+    const google = fakeGoogle({})
+    await fetchKeywordIdeas(google, site, kp)
+    expect(google.calls[0].api).toBe('Keyword Planner')
+    expect(google.calls[0].url).toBe('https://googleads.googleapis.com/v26/customers/1234567890:generateKeywordIdeas')
+    expect(google.calls[0].body).toEqual({
+      urlSeed: { url: 'https://mixingpal.com/' },
+      geoTargetConstants: ['geoTargetConstants/2840'],
+      language: 'languageConstants/1000',
+      // Search only, like the Search Console data it is ranked with.
+      keywordPlanNetwork: 'GOOGLE_SEARCH',
+      pageSize: 10000,
     })
+    expect(google.calls[0].headers).toEqual({})
   })
 
-  test('sends seeds and customerId when set', async () => {
-    const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: '{}' } }])
-    await fetchKeywordIdeas(exec, { ...site, seedKeywords: ['ableton arrangement'] }, { ...kp, customerId: '1234567890' })
-    const args = JSON.parse(exec.calls[0].args[3])
-    expect(args.keywords).toEqual(['ableton arrangement'])
-    expect(args.customerId).toBe('1234567890')
+  test('seeds with keywords and the URL, and sends the manager account when set', async () => {
+    const google = fakeGoogle({})
+    await fetchKeywordIdeas(google, { ...site, seedKeywords: ['ableton arrangement'] }, { ...kp, loginCustomerId: '1112223333' })
+    expect(google.calls[0].body.keywordAndUrlSeed).toEqual({ url: 'https://mixingpal.com/', keywords: ['ableton arrangement'] })
+    expect(google.calls[0].body.urlSeed).toBeUndefined()
+    expect(google.calls[0].headers).toEqual({ 'login-customer-id': '1112223333' })
+  })
+
+  test('follows the page token through every page', async () => {
+    const idea = (text: string) => ({ text, keywordIdeaMetrics: { avgMonthlySearches: '100', competition: 'LOW' } })
+    const google = fakeGoogle({ results: [idea('one')], nextPageToken: 'p2' }, { results: [idea('two')] })
+    const ideas = await fetchKeywordIdeas(google, site, kp)
+    expect(ideas.map((i) => i.keyword)).toEqual(['one', 'two'])
+    expect(google.calls[1].body.pageToken).toBe('p2')
   })
 
   test('parses string counts and missing competition', async () => {
@@ -46,8 +56,7 @@ describe('fetchKeywordIdeas', () => {
       { text: 'tiny', keywordIdeaMetrics: { avgMonthlySearches: '10', competition: 'LOW' } },
       { text: 'no metrics' },
     ]
-    const exec = fakeExec([{ match: is('gum', 'read'), result: { stdout: JSON.stringify({ results }) } }])
-    expect(await fetchKeywordIdeas(exec, site, kp)).toEqual([
+    expect(await fetchKeywordIdeas(fakeGoogle({ results }), site, kp)).toEqual([
       {
         keyword: 'how to arrange a song',
         source: 'keyword-planner',
@@ -61,13 +70,14 @@ describe('fetchKeywordIdeas', () => {
     ])
   })
 
-  test('propagates GumError', async () => {
-    const exec = fakeExec([
-      {
-        match: is('gum', 'read'),
-        result: { code: 1, stderr: '{"error_code":"PERMISSION_DENIED","message":"developer token not approved"}' },
-      },
-    ])
-    await expect(fetchKeywordIdeas(exec, site, kp)).rejects.toBeInstanceOf(GumError)
+  test('fails loudly instead of truncating when pages never end', async () => {
+    const google = fakeGoogle({ results: [], nextPageToken: 'again' })
+    await expect(fetchKeywordIdeas(google, site, kp)).rejects.toThrow('Keyword Planner returned more than 10 pages')
+  })
+
+  test('propagates a Google failure', async () => {
+    await expect(fetchKeywordIdeas(fakeGoogle(new Error('Keyword Planner failed: PERMISSION_DENIED')), site, kp)).rejects.toThrow(
+      'PERMISSION_DENIED',
+    )
   })
 })

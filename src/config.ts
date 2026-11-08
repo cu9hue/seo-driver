@@ -3,8 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Config, SiteConfig } from './types.js'
 
-// Google's documented keywordSeed cap, which gum enforces.
+// Google's documented caps on seed keywords and locations.
 const MAX_SEED_KEYWORDS = 20
+const MAX_LOCATIONS = 10
 // Build commands are split on spaces and run without a shell, so shell syntax
 // would not do what it looks like.
 const SHELL_SYNTAX = /[&|;<>`$'"\\*?(){}[\]]|^\s*\w+=/
@@ -82,12 +83,20 @@ function parseSite(raw: unknown, index: number): SiteConfig {
   }
 }
 
-// Clones are checked against this path, so it must be absolute. A relative
+// Clones are checked against workDir, so paths must be absolute. A relative
 // path is taken from the config file's folder, which stays put under cron.
-function resolveWorkDir(value: string | undefined, configFile: string): string {
-  if (value === undefined) return path.join(os.homedir(), '.cache', 'seo-driver')
+function resolvePath(value: string | undefined, configFile: string, fallback: string): string {
+  if (value === undefined) return path.join(os.homedir(), fallback)
   if (value === '~' || value.startsWith('~/')) return path.join(os.homedir(), value.slice(1))
   return path.resolve(path.dirname(path.resolve(configFile)), value)
+}
+
+function accountId(raw: Raw, key: string): string | undefined {
+  const value = optionalString(raw, key, 'keywordPlanner')?.replace(/-/g, '')
+  if (value !== undefined && !/^\d{10}$/.test(value)) {
+    throw new ConfigError(`keywordPlanner.${key} must be a 10-digit Google Ads account id, such as 123-456-7890`)
+  }
+  return value
 }
 
 export function loadConfig(file: string): Config {
@@ -101,6 +110,12 @@ export function loadConfig(file: string): Config {
 
   const kpRaw = raw.keywordPlanner ?? {}
   if (!isObject(kpRaw)) throw new ConfigError('keywordPlanner must be an object')
+  const geoTargetConstants = stringArray(kpRaw, 'geoTargetConstants', 'keywordPlanner', ['2840'])
+  if (geoTargetConstants.length === 0 || geoTargetConstants.length > MAX_LOCATIONS) {
+    throw new ConfigError(`keywordPlanner.geoTargetConstants needs 1 to ${MAX_LOCATIONS} locations`)
+  }
+  const customerId = accountId(kpRaw, 'customerId')
+  if (!customerId) throw new ConfigError('keywordPlanner.customerId is required: the 10-digit Google Ads account id')
   const scRaw = raw.searchConsole ?? {}
   if (!isObject(scRaw)) throw new ConfigError('searchConsole must be an object')
   const country = optionalString(scRaw, 'country', 'searchConsole') ?? 'usa'
@@ -123,10 +138,16 @@ export function loadConfig(file: string): Config {
   }
 
   return {
-    workDir: resolveWorkDir(optionalString(raw, 'workDir', 'config'), file),
+    workDir: resolvePath(optionalString(raw, 'workDir', 'config'), file, path.join('.cache', 'seo-driver')),
+    googleCredentials: resolvePath(
+      optionalString(raw, 'googleCredentials', 'config'),
+      file,
+      path.join('.config', 'seo-driver', 'google.json'),
+    ),
     keywordPlanner: {
-      customerId: optionalString(kpRaw, 'customerId', 'keywordPlanner'),
-      geoTargetConstants: stringArray(kpRaw, 'geoTargetConstants', 'keywordPlanner', ['2840']),
+      customerId,
+      loginCustomerId: accountId(kpRaw, 'loginCustomerId'),
+      geoTargetConstants,
       language: optionalString(kpRaw, 'language', 'keywordPlanner') ?? '1000',
     },
     searchConsole: { country: country === 'all' ? undefined : country },

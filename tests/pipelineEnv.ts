@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { FetchText } from '../src/covered.js'
 import type { GuideResult } from '../src/github.js'
+import { TOKEN_URL, type HttpPost } from '../src/google.js'
 import type { Deps } from '../src/pipeline.js'
 import type { Config, SiteConfig } from '../src/types.js'
 import { fakeExec, is, type FakeExec, type Handler } from './fakeExec.js'
@@ -43,6 +44,7 @@ export interface Env {
   exec: FakeExec
   logs: string[]
   claudeRuns: string[]
+  googleCalls: Array<{ url: string; body: string }>
   callsTo: (cmd: string, ...prefix: string[]) => number
 }
 
@@ -54,15 +56,34 @@ export interface EnvOptions {
   reviewer?: (round: number) => object
   fixer?: (cwd: string) => GuideResult
   sitemapLocs?: string[]
+  // Answers a Google request before the defaults below; undefined falls through.
+  google?: (url: string, body: string) => { status: number; body: unknown } | undefined
+}
+
+const KP_IDEAS = {
+  results: [
+    { text: 'how to finish a song', keywordIdeaMetrics: { avgMonthlySearches: '1900', competition: 'LOW' } },
+    { text: 'ableton drop', keywordIdeaMetrics: { avgMonthlySearches: '880', competition: 'MEDIUM' } },
+  ],
+}
+
+function defaultGoogle(url: string): { status: number; body: unknown } {
+  if (url === TOKEN_URL) return { status: 200, body: { access_token: 'at', expires_in: 3600 } }
+  if (url.includes('/searchAnalytics/query')) return { status: 200, body: { rows: [] } }
+  if (url.includes(':generateKeywordIdeas')) return { status: 200, body: KP_IDEAS }
+  return { status: 404, body: { error: { status: 'NOT_FOUND', message: url } } }
 }
 
 export const result = (structured: object) => ({ stdout: JSON.stringify({ type: 'result', is_error: false, structured_output: structured }) })
 
 export function makeEnv(options: EnvOptions = {}): Env {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-work-'))
+  const googleCredentials = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'seo-driver-creds-')), 'google.json')
+  fs.writeFileSync(googleCredentials, JSON.stringify({ clientId: 'cid', clientSecret: 'csec', refreshToken: 'rt' }), { mode: 0o600 })
   const config: Config = {
     workDir,
-    keywordPlanner: { geoTargetConstants: ['2840'], language: '1000' },
+    googleCredentials,
+    keywordPlanner: { customerId: '1234567890', geoTargetConstants: ['2840'], language: '1000' },
     searchConsole: { country: 'usa' },
     claudeMaxBudgetUsd: 10,
     sites: options.sites ?? [site('mixingpal.com')],
@@ -79,7 +100,6 @@ export function makeEnv(options: EnvOptions = {}): Env {
     })
 
   const defaults: Handler[] = [
-    { match: is('gum', '--version'), result: { stdout: 'gum 2.3.1' } },
     { match: is('git', '--version'), result: { stdout: 'git version 2.50' } },
     { match: is('gh', 'auth', 'status'), result: {} },
     { match: is('claude', '--version'), result: { stdout: '2.1.310' } },
@@ -88,21 +108,6 @@ export function makeEnv(options: EnvOptions = {}): Env {
     { match: is('gh', 'config', 'get', 'git_protocol'), result: { stdout: 'https\n' } },
     { match: is('git', 'config', '--get-urlmatch'), result: { stdout: '!gh auth git-credential\n' } },
     { match: is('gh', 'pr', 'list'), result: { stdout: '[]' } },
-    {
-      match: is('gum', 'read', 'searchconsole.searchanalytics.query'),
-      result: { stdout: JSON.stringify({ rows: [] }) },
-    },
-    {
-      match: is('gum', 'read', 'googleads.keywordPlanIdeas.generateKeywordIdeas'),
-      result: {
-        stdout: JSON.stringify({
-          results: [
-            { text: 'how to finish a song', keywordIdeaMetrics: { avgMonthlySearches: '1900', competition: 'LOW' } },
-            { text: 'ableton drop', keywordIdeaMetrics: { avgMonthlySearches: '880', competition: 'MEDIUM' } },
-          ],
-        }),
-      },
-    },
     {
       match: is('gh', 'repo', 'clone'),
       result: (_cmd, args) => {
@@ -144,8 +149,14 @@ export function makeEnv(options: EnvOptions = {}): Env {
     url.endsWith('/sitemap.xml')
       ? { status: 200, text: `<urlset>${sitemapLocs.map((l) => `<url><loc>${l}</loc></url>`).join('')}</urlset>` }
       : { status: 404, text: '' }
+  const googleCalls: Env['googleCalls'] = []
+  const http: HttpPost = async (url, init) => {
+    googleCalls.push({ url, body: init.body })
+    const answer = options.google?.(url, init.body) ?? defaultGoogle(url)
+    return { status: answer.status, text: JSON.stringify(answer.body) }
+  }
   const logs: string[] = []
-  const deps: Deps = { exec, fetchText, now: () => NOW, home: '/home/u', log: (line) => logs.push(line) }
+  const deps: Deps = { exec, fetchText, http, now: () => NOW, home: '/home/u', log: (line) => logs.push(line) }
   const callsTo = (cmd: string, ...prefix: string[]) => exec.calls.filter((c) => is(cmd, ...prefix)(c.cmd, c.args)).length
-  return { config, deps, exec, logs, claudeRuns, callsTo }
+  return { config, deps, exec, logs, claudeRuns, googleCalls, callsTo }
 }

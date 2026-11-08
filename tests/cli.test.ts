@@ -12,6 +12,8 @@ function configFile(): string {
     file,
     JSON.stringify({
       workDir: path.join(dir, 'work'),
+      googleCredentials: makeEnv().config.googleCredentials,
+      keywordPlanner: { customerId: '1234567890' },
       sites: [
         {
           domain: 'mixingpal.com',
@@ -52,6 +54,12 @@ describe('main', () => {
     const env = makeEnv()
     expect(await main(['publish'], env.deps)).toBe(1)
     expect(env.logs.join('\n')).toContain('usage: seo-driver run')
+  })
+
+  test('login without --client prints usage and exits 1', async () => {
+    const env = makeEnv()
+    expect(await main(['login'], env.deps)).toBe(1)
+    expect(env.logs.join('\n')).toContain('seo-driver login --client <client_secret.json>')
   })
 
   test('log lines start with a UTC timestamp', () => {

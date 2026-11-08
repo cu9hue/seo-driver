@@ -1,5 +1,6 @@
 {
   "keywordPlanner": {
+    "customerId": "123-456-7890",
     "geoTargetConstants": ["2840"],
     "language": "1000"
   },

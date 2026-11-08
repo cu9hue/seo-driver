@@ -4,7 +4,7 @@
 
 For each due site it:
 
-1. pulls Search Console gaps (queries from your target country with 100+ impressions and a click rate of 1% or less over the last 28 days) and Keyword Planner ideas through [gum](https://github.com/ehmo/gum);
+1. pulls Search Console gaps (queries from your target country with 100+ impressions and a click rate of 1% or less over the last 28 days) and Keyword Planner ideas from the Google APIs;
 2. drops topics the site already covers (its live sitemap, the pages in its repo, and past guide PRs);
 3. clones the site repo and has headless Claude Code pick one keyword, research it, write the guide with your `writing` skill, and link it in;
 4. has a second Claude run check every claim against its source, check for slop, and check for overlap, with up to two fix rounds;
@@ -20,7 +20,6 @@ A site is due when its newest `seo-guide` PR is at least `intervalDays` calendar
 On the machine that runs it (macOS or Ubuntu, amd64 or arm64):
 
 - Node 22 or later.
-- [gum](https://github.com/ehmo/gum/releases) v2.3.1 or later: `curl -fsSL https://raw.githubusercontent.com/ehmo/gum/main/install.sh | bash`.
 - [`gh`](https://cli.github.com/), logged in with push access to every site repo: `gh auth login`, then `gh auth setup-git` so `git push` uses the same login. On a headless box this step is easy to miss, and the push fails only after every Claude run.
 - `git`, with `user.name` and `user.email` set.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), logged in, recent enough to have `--restricted` (2.1.319 has it).
@@ -36,43 +35,34 @@ npm run build
 ## Google setup
 
 1. Create a Google Cloud project. Enable the **Search Console API** and the **Google Ads API**.
-2. Create an OAuth client of type **Desktop app**, and give it to gum:
+2. Set up the OAuth consent screen with user type **External**, then **publish** it (status "In production"). Google expires the logins of apps left in "Testing" after 7 days, so a scheduled run would stop a week after you log in. For your own use you don't need Google's verification: the sign-in page warns that the app is unverified, and you continue past it.
+3. Create an OAuth client of type **Desktop app** and download its JSON file.
+4. Log in with the Google account that has your Search Console properties and your Google Ads account:
 
    ```bash
-   printf '%s' "$GOOGLE_OAUTH_CLIENT_SECRET" | gum auth use-oauth-client --client-id "$GOOGLE_OAUTH_CLIENT_ID" --secret-stdin
-   gum login --service searchconsole
-   gum login --service googleads
+   node dist/cli.js login --client ~/Downloads/client_secret_XXXX.json
    ```
 
-3. Get Keyword Planner access for the Cloud project. **The tool opens no PRs until Keyword Planner works**, so start here. Since September 9, 2026, Google ties Ads API access to the Cloud project, not to a developer token:
+   It prints a sign-in URL. Open it in a browser on the same machine. The login lands in `~/.config/seo-driver/google.json`, readable only by you. The file holds a refresh token, so treat it like a password.
+
+   On a headless server, log in on your laptop instead and copy the file over. The login isn't tied to the machine. Copy it to a temporary name and rename it, so a run never reads half a file:
+
+   ```bash
+   ssh server 'mkdir -p -m 700 ~/.config/seo-driver'
+   scp ~/.config/seo-driver/google.json server:.config/seo-driver/google.json.new
+   ssh server 'chmod 600 ~/.config/seo-driver/google.json.new && mv ~/.config/seo-driver/google.json.new ~/.config/seo-driver/google.json'
+   ```
+
+   A run refuses a login file that other users can read. If a run ever says the login expired or was revoked, log in again and copy the new file.
+
+5. Get Keyword Planner access for the Cloud project. **The tool opens no PRs until Keyword Planner works**, and approval takes a while, so apply early. Since September 9, 2026, Google ties Ads API access to the Cloud project, not to a developer token:
 
    - Enabling the Google Ads API gives the project **Test** access, which only reaches test accounts.
    - In the Cloud Console, open the Google Ads API **Overview** page and apply for access there. Applications made from a manager account's API Center are not processed any more.
    - **Explorer** access is the first level, but it does not cover Keyword Planner (`KeywordPlanIdeaService`).
    - **Basic** access covers it. It needs brand verification of the Cloud project first.
 
-   Google now ignores developer tokens, but gum 2.3.1 still refuses to call Google Ads without one, so give it any value, such as the token you already have:
-
-   ```bash
-   printf '%s' "$GOOGLE_ADS_DEVELOPER_TOKEN" | gum auth use-ads-developer-token --stdin
-   gum config set googleads.customer_id=<10-digit Ads account id>
-   # only when you reach the account through a manager account:
-   gum config set googleads.login_customer_id=<10-digit manager id>
-   ```
-
-   Check it with `gum read googleads.keywordPlanIdeas.generateKeywordHistoricalMetrics --args '{"keywords":["ableton"]}'`. A `PERMISSION_DENIED` here usually means the project doesn't have Basic access yet.
-
-### Headless Ubuntu
-
-gum keeps OAuth logins and the developer token in the OS keyring. Search Console and Google Ads only work with your own OAuth login, so a service account is no way around this. Under cron the keyring is usually locked or missing, and gum fails with `AUTH_KEYCHAIN_UNAVAILABLE`.
-
-The fix is to start an unlocked keyring for each run. Install `gnome-keyring` and `libsecret-1-0`, keep the keyring password in a file only you can read (`chmod 600 ~/.config/seo-driver/keyring-pass`), and do both the `gum login` steps and the runs inside that session:
-
-```bash
-dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock --components=secrets < ~/.config/seo-driver/keyring-pass >/dev/null; node dist/cli.js run'
-```
-
-I couldn't test this on Ubuntu here, so try the dry run below this way before you schedule it. Set the developer token placeholder with `GUM_GOOGLE_ADS_DEVELOPER_TOKEN=<any value>` on the same line if you'd rather keep it out of the keyring.
+   Put your 10-digit Ads account id in the config as `keywordPlanner.customerId`. A Keyword Planner `PERMISSION_DENIED` in the run log usually means the project doesn't have Basic access yet.
 
 ## Configure
 
@@ -97,10 +87,13 @@ Settings for all sites:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `keywordPlanner.customerId` | required | Your 10-digit Google Ads account id, such as `123-456-7890`. |
+| `keywordPlanner.loginCustomerId` | none | The manager account id, only when you reach the Ads account through a manager account. |
 | `keywordPlanner.geoTargetConstants` | `["2840"]` (US) | Keyword Planner locations. |
 | `keywordPlanner.language` | `"1000"` (English) | Keyword Planner language. |
 | `searchConsole.country` | `"usa"` | Search Console queries from this country only, as a lowercase 3-letter code. Match it to `geoTargetConstants`. `"all"` turns the filter off. |
 | `claudeMaxBudgetUsd` | `10` | Spend cap for each Claude run (writer, reviewer, fixer). A run that hits it fails its site. |
+| `googleCredentials` | `~/.config/seo-driver/google.json` | The login file that `login` writes. |
 | `workDir` | `~/.cache/seo-driver` | Holds the clones, the run lock, and `failures.json`. A relative path is taken from the config file's folder. |
 
 ## Run
@@ -133,9 +126,9 @@ Scheduling is yours. For example, a daily cron entry:
 
 ## What Claude can do
 
-The script makes every gum, `git`, `gh`, and build call itself. Search text and the pages Claude reads can carry instructions planted by anyone, so Claude runs headless with:
+The script makes every Google, `git`, `gh`, and build call itself. Search text and the pages Claude reads can carry instructions planted by anyone, so Claude runs headless with:
 
-- `--restricted`: no settings files (yours or the site repo's), no MCP servers, no shell or other command tools, and file tools confined to the clone and the `writing` skill folder;
+- `--restricted`: no settings files (yours or the site repo's), no MCP servers, no shell or other command tools, and file tools confined to the clone and the `writing` skill folder, so Claude can't read your Google login;
 - these tools only: read, edit, and search files, plus web search and fetch. The reviewer cannot edit;
 - `--permission-mode manual`, the `claudeMaxBudgetUsd` spend cap, and hooks turned off.
 

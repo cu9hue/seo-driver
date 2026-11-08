@@ -18,7 +18,7 @@ import { fakeExec, is } from './fakeExec.js'
 
 const site: SiteConfig = {
   domain: 'mixingpal.com',
-  repo: 'antithetical-labs/mixing-pal-landing',
+  repo: 'your-org/your-site',
   baseBranch: 'main',
   intervalDays: 2,
   seedKeywords: [],
@@ -32,7 +32,7 @@ describe('cloneSite', () => {
     const clone = await cloneSite(exec, site, '/work', new Date('2026-10-24T08:30:00Z'))
     expect(clone).toBe(path.join('/work', 'mixingpal.com-20261024083000'))
     expect(exec.calls[0].args).toEqual([
-      'repo', 'clone', 'antithetical-labs/mixing-pal-landing', clone, '--', '--depth', '1', '--branch', 'main',
+      'repo', 'clone', 'your-org/your-site', clone, '--', '--depth', '1', '--branch', 'main',
     ])
   })
 

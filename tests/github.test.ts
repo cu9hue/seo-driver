@@ -5,7 +5,7 @@ import { fakeExec, is } from './fakeExec.js'
 
 const site: SiteConfig = {
   domain: 'mixingpal.com',
-  repo: 'antithetical-labs/mixing-pal-landing',
+  repo: 'your-org/your-site',
   baseBranch: 'main',
   intervalDays: 2,
   seedKeywords: [],
@@ -168,7 +168,7 @@ describe('ensureLabel', () => {
     const exec = fakeExec([{ match: is('gh', 'label', 'create'), result: {} }])
     await ensureLabel(exec, site.repo)
     expect(exec.calls[0].args).toEqual([
-      'label', 'create', 'seo-guide', '--repo', 'antithetical-labs/mixing-pal-landing', '--force', '--color', '1D76DB',
+      'label', 'create', 'seo-guide', '--repo', 'your-org/your-site', '--force', '--color', '1D76DB',
     ])
   })
 })
@@ -180,7 +180,7 @@ describe('openPr', () => {
     expect(url).toBe('https://github.com/x/y/pull/7')
     expect(exec.calls.length).toBe(1)
     expect(exec.calls[0].args).toEqual([
-      'pr', 'create', '--repo', 'antithetical-labs/mixing-pal-landing', '--base', 'main',
+      'pr', 'create', '--repo', 'your-org/your-site', '--base', 'main',
       '--head', 'seo-guide/arrange-song-from-loop', '--title', 'Add guide: How to Arrange',
       '--label', 'seo-guide', '--body-file', '-',
     ])

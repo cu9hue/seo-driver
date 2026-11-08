@@ -13,7 +13,7 @@ function writeConfig(value: unknown): string {
 
 const minimalSite = {
   domain: 'mixingpal.com',
-  repo: 'antithetical-labs/mixing-pal-landing',
+  repo: 'your-org/your-site',
   buildCommands: ['npm ci', 'npm run build'],
   exampleGuide: 'how-to-arrange-a-song/index.html',
 }
@@ -60,7 +60,7 @@ describe('loadConfig', () => {
   })
 
   test('rejects a repo not shaped owner/name', () => {
-    expect(() => loadConfig(writeConfig({ sites: [{ ...minimalSite, repo: 'mixing-pal-landing' }] }))).toThrow(/repo/)
+    expect(() => loadConfig(writeConfig({ sites: [{ ...minimalSite, repo: 'your-site' }] }))).toThrow(/repo/)
   })
 
   test('rejects duplicate domains', () => {

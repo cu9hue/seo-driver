@@ -2,6 +2,7 @@
   "name": "seo-driver",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "seo-driver": "dist/cli.js"

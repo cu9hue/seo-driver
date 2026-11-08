@@ -152,3 +152,7 @@ Edits under `.git/` are denied. After each Claude session, and before each build
 npm test
 npm run typecheck
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

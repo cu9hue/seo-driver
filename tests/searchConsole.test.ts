@@ -5,7 +5,7 @@ import { fakeExec, is } from './fakeExec.js'
 
 const site: SiteConfig = {
   domain: 'mixingpal.com',
-  repo: 'antithetical-labs/mixing-pal-landing',
+  repo: 'your-org/your-site',
   baseBranch: 'main',
   intervalDays: 2,
   searchConsoleProperty: 'sc-domain:mixingpal.com',
